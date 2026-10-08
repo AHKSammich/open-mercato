@@ -62,6 +62,16 @@ import {
   summarizePersonCompanies,
   syncLegacyPrimaryCompanyLink,
 } from '../lib/personCompanies'
+import {
+  captureInteractionDetails,
+  labelAssignmentIndexEntries,
+  removeEntityPrivateDependents,
+  restoreEntityPrivateDependents,
+  restoreInteractionDetails,
+  type EntityPrivateDependentsSnapshot,
+  type InteractionDetailsSnapshot,
+  type LabelAssignmentRestoreSnapshot,
+} from './entityDeleteDependents'
 
 const INTERACTION_ENTITY_ID = 'customers:customer_interaction'
 
@@ -133,7 +143,7 @@ type PersonInteractionSnapshot = {
   updatedAt: Date
   deletedAt: Date | null
   custom?: Record<string, unknown>
-}
+} & InteractionDetailsSnapshot
 
 type PersonSnapshot = {
   entity: {
@@ -193,6 +203,7 @@ type PersonSnapshot = {
 type PersonUndoPayload = {
   before?: PersonSnapshot | null
   after?: PersonSnapshot | null
+  privateDependents?: EntityPrivateDependentsSnapshot
 }
 
 const personCrudIndexer: CrudIndexerConfig<CustomerEntity> = {
@@ -455,6 +466,7 @@ async function loadPersonSnapshot(em: EntityManager, entityId: string): Promise<
       createdAt: interaction.createdAt,
       updatedAt: interaction.updatedAt,
       deletedAt: interaction.deletedAt ?? null,
+      ...captureInteractionDetails(interaction),
       custom: await loadCustomFieldSnapshot(em, {
         entityId: INTERACTION_ENTITY_ID,
         recordId: interaction.id,
@@ -1225,7 +1237,10 @@ const updatePersonCommand: CommandHandler<PersonUpdateInput, { entityId: string 
   },
 }
 
-const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; query?: Record<string, unknown> }, { entityId: string }> =
+const deletePersonCommand: CommandHandler<
+  { body?: Record<string, unknown>; query?: Record<string, unknown> },
+  { entityId: string; privateDependents?: EntityPrivateDependentsSnapshot }
+> =
   {
     id: 'customers.people.delete',
     async prepare(input, ctx) {
@@ -1250,8 +1265,10 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
       }
 
       const profile = await em.findOne(CustomerPersonProfile, { entity: record })
+      let privateDependents: EntityPrivateDependentsSnapshot = {}
       await withAtomicFlush(em, [
         async () => {
+          privateDependents = await removeEntityPrivateDependents(em, record)
           if (profile) em.remove(profile)
           await em.nativeDelete(CustomerAddress, { entity: record, organizationId: record.organizationId, tenantId: record.tenantId })
           await em.nativeDelete(CustomerComment, { entity: record, organizationId: record.organizationId, tenantId: record.tenantId })
@@ -1342,10 +1359,11 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
 
       await emitQueryIndexDeleteEvents(ctx, [personEntityIndexEntry(record)])
       await emitQueryIndexDeleteEvents(ctx, indexDeletes)
+      await emitQueryIndexDeleteEvents(ctx, labelAssignmentIndexEntries(record, privateDependents.labelAssignments))
       await emitQueryIndexUpsertEvents(ctx, dealUpserts)
-      return { entityId: record.id }
+      return { entityId: record.id, privateDependents }
     },
-    buildLog: async ({ snapshots }) => {
+    buildLog: async ({ result, snapshots }) => {
       const before = snapshots.before as PersonSnapshot | undefined
       if (!before) return null
       const { translate } = await resolveTranslations()
@@ -1359,6 +1377,7 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
         payload: {
           undo: {
             before,
+            privateDependents: result?.privateDependents,
           } satisfies PersonUndoPayload,
         },
       }
@@ -1385,6 +1404,7 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
         profile: CustomerPersonProfile
         beforeInteractions: PersonInteractionSnapshot[]
         beforeTodos: PersonTodoSnapshot[]
+        restoredLabelAssignments: LabelAssignmentRestoreSnapshot[]
       }
       try {
         txResult = await (async () => {
@@ -1506,6 +1526,8 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
       await withAtomicFlush(em, [
         () => syncEntityTags(em, entity, before.tagIds),
       ])
+      const restoredLabelAssignments = await restoreEntityPrivateDependents(em, entity, payload?.privateDependents)
+      await em.flush()
 
       const beforeActivities = (before as { activities?: PersonActivitySnapshot[] }).activities ?? []
       const beforeTodos = (before as { todos?: PersonTodoSnapshot[] }).todos ?? []
@@ -1646,6 +1668,7 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
           source: interaction.source,
           appearanceIcon: interaction.appearanceIcon,
           appearanceColor: interaction.appearanceColor,
+          ...restoreInteractionDetails(interaction),
           createdAt: interaction.createdAt,
           updatedAt: interaction.updatedAt,
           deletedAt: interaction.deletedAt,
@@ -1654,7 +1677,7 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
       }
       await em.flush()
 
-      return { entity, profile, beforeInteractions, beforeTodos }
+      return { entity, profile, beforeInteractions, beforeTodos, restoredLabelAssignments }
         })()
         await em.commit()
       } catch (err) {
@@ -1755,6 +1778,7 @@ const deletePersonCommand: CommandHandler<{ body?: Record<string, unknown>; quer
       }
       await emitQueryIndexUpsertEvents(ctx, [personEntityIndexEntry(entity)])
       await emitQueryIndexUpsertEvents(ctx, upsertEntries)
+      await emitQueryIndexUpsertEvents(ctx, labelAssignmentIndexEntries(entity, txResult.restoredLabelAssignments))
       await emitQueryIndexUpsertEvents(ctx, dealUpserts)
     },
   }
