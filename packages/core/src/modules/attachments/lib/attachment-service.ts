@@ -15,6 +15,11 @@ import {
 } from './scoped-upload-service'
 import { readAttachmentMetadata, type AttachmentAssignment } from './metadata'
 import {
+  lockAttachmentStorageReferences,
+  removeAttachmentRecord,
+  resolveAttachmentStorageRelease,
+} from './storageReferences'
+import {
   buildAttachmentContentDisposition,
   canRenderInlineAttachment,
   hasDangerousExecutableExtension,
@@ -428,6 +433,15 @@ export class DefaultAttachmentService implements AttachmentService {
         error: 'Attachment release inside an ambient transaction requires flush: false and deferred provider cleanup',
       })
     }
+    if (
+      options.flush === false
+      && typeof isInTransaction === 'function'
+      && !isInTransaction.call(em)
+    ) {
+      throw new CrudHttpError(500, {
+        error: 'Deferred attachment release requires an ambient transaction that holds the storage reference lock until commit',
+      })
+    }
     const scope = { tenantId: input.tenantId, organizationId: input.organizationId }
     const attachment = await findOneWithDecryption(
       em,
@@ -458,11 +472,17 @@ export class DefaultAttachmentService implements AttachmentService {
 
     const driver = await this.storageDriverFactory.resolveForPartition(attachment.partitionCode, scope)
     const deleteProviderBytes = () => driver.delete(attachment.partitionCode, attachment.storagePath)
-    em.remove(attachment)
     if (options.flush === false) {
-      return deleteProviderBytes
+      const removal = resolveAttachmentStorageRelease(
+        await lockAttachmentStorageReferences(em, attachment),
+        attachment.id,
+      )
+      if (!removal.removed) throw new CrudHttpError(404, { error: 'Attachment not found' })
+      em.remove(attachment)
+      return removal.releaseStorage ? deleteProviderBytes : undefined
     }
-    await em.flush()
-    await deleteProviderBytes()
+    const removal = await removeAttachmentRecord(em, attachment)
+    if (!removal.removed) throw new CrudHttpError(404, { error: 'Attachment not found' })
+    if (removal.releaseStorage) await deleteProviderBytes()
   }
 }

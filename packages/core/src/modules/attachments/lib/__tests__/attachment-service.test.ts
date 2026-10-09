@@ -85,6 +85,8 @@ function createHarness(options: {
   uploadError?: unknown
   /** Simulates a container without the scoped upload service registered. */
   withoutScopedUpload?: boolean
+  /** Ids of the attachment rows the storage-reference lock finds for the stored object. */
+  storageReferenceIds?: string[]
 } = {}) {
   const selectedPartition = options.partition ?? partition()
   const selectedAttachment = options.attachment === undefined ? attachment() : options.attachment
@@ -101,14 +103,18 @@ function createHarness(options: {
     delete: jest.fn(async () => undefined),
     toLocalPath: jest.fn(),
   }
+  const storageReferenceIds = options.storageReferenceIds
+    ?? (selectedAttachment ? [selectedAttachment.id] : [])
+  const lockedStorageReferences = jest.fn(async () => storageReferenceIds.map((id) => ({ id })))
+  const query: Record<string, unknown> = {
+    where: () => query,
+    orderBy: () => query,
+    forUpdate: () => query,
+    executeTakeFirst: async () => ({ total_size: options.usage ?? 0 }),
+    execute: lockedStorageReferences,
+  }
   const db = {
-    selectFrom: jest.fn(() => ({
-      select: () => ({
-        where: () => ({
-          executeTakeFirst: async () => ({ total_size: options.usage ?? 0 }),
-        }),
-      }),
-    })),
+    selectFrom: jest.fn(() => ({ select: () => query })),
   }
   let inTransaction = false
   const em: any = {
@@ -141,7 +147,7 @@ function createHarness(options: {
     }),
   }
   const service = new DefaultAttachmentService(em, factory, () => (options.withoutScopedUpload ? null : scopedUpload))
-  return { service, em, driver, factory, scopedUpload }
+  return { service, em, driver, factory, scopedUpload, lockedStorageReferences }
 }
 
 /**
@@ -504,6 +510,61 @@ describe('DefaultAttachmentService', () => {
     expect(em.flush.mock.invocationCallOrder[0]).toBeLessThan(driver.delete.mock.invocationCallOrder[0])
   })
 
+  it('keeps provider bytes another attachment row still references', async () => {
+    const { service, driver, em, lockedStorageReferences } = createHarness({
+      storageReferenceIds: ['attachment-1', 'attachment-copy'],
+    })
+
+    await service.releaseScoped({
+      attachmentId: 'attachment-1',
+      tenantId: 'tenant-1',
+      organizationId: 'org-1',
+      expectedOwner: { entityId: 'documents:document', recordId: 'document-1' },
+      expectedAssignment: { type: 'documents:document', id: 'document-1' },
+    })
+
+    expect(lockedStorageReferences).toHaveBeenCalledTimes(1)
+    expect(em.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'attachment-1' }))
+    expect(em.commit).toHaveBeenCalledTimes(1)
+    expect(driver.delete).not.toHaveBeenCalled()
+  })
+
+  it('returns no deferred provider cleanup while another row references the bytes', async () => {
+    const { service, driver, em } = createHarness({
+      storageReferenceIds: ['attachment-1', 'attachment-copy'],
+    })
+    let cleanup: (() => Promise<void>) | void = async () => undefined
+
+    await withAtomicFlush(em, [async () => {
+      cleanup = await service.releaseScoped({
+        attachmentId: 'attachment-1',
+        tenantId: 'tenant-1',
+        organizationId: 'org-1',
+        expectedOwner: { entityId: 'documents:document', recordId: 'document-1' },
+        expectedAssignment: { type: 'documents:document', id: 'document-1' },
+      }, { em, flush: false })
+    }], { transaction: true, label: 'attachments.release' })
+
+    expect(em.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'attachment-1' }))
+    expect(cleanup).toBeUndefined()
+    expect(driver.delete).not.toHaveBeenCalled()
+  })
+
+  it('reports not found when a concurrent release already removed the row', async () => {
+    const { service, driver, em } = createHarness({ storageReferenceIds: [] })
+
+    await expectStatus(service.releaseScoped({
+      attachmentId: 'attachment-1',
+      tenantId: 'tenant-1',
+      organizationId: 'org-1',
+      expectedOwner: { entityId: 'documents:document', recordId: 'document-1' },
+      expectedAssignment: { type: 'documents:document', id: 'document-1' },
+    }), 404)
+
+    expect(em.remove).not.toHaveBeenCalled()
+    expect(driver.delete).not.toHaveBeenCalled()
+  })
+
   it('does not release an attachment carrying another assignment', async () => {
     const { service, driver, em } = createHarness({
       attachment: attachment({
@@ -597,6 +658,22 @@ describe('DefaultAttachmentService', () => {
 
     expect(em.rollback).toHaveBeenCalledTimes(1)
     expect(cleanup).toEqual(expect.any(Function))
+    expect(driver.delete).not.toHaveBeenCalled()
+  })
+
+  it('rejects deferred release outside a transaction that would hold the storage reference lock', async () => {
+    const { service, driver, em, lockedStorageReferences } = createHarness()
+
+    await expectStatus(service.releaseScoped({
+      attachmentId: 'attachment-1',
+      tenantId: 'tenant-1',
+      organizationId: 'org-1',
+      expectedOwner: { entityId: 'documents:document', recordId: 'document-1' },
+      expectedAssignment: { type: 'documents:document', id: 'document-1' },
+    }, { em, flush: false }), 500)
+
+    expect(lockedStorageReferences).not.toHaveBeenCalled()
+    expect(em.remove).not.toHaveBeenCalled()
     expect(driver.delete).not.toHaveBeenCalled()
   })
 
