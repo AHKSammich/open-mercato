@@ -10,7 +10,7 @@ import {
 } from '@open-mercato/core/helpers/integration/undoHarness'
 
 /**
- * TC-SALES-043: restoring a return re-checks the currently returnable quantity.
+ * TC-SALES-049: restoring a return re-checks the currently returnable quantity.
  *
  * `sales.returns.create` redo and `sales.returns.delete` undo re-apply a return
  * snapshot. When the shipped quantity has meanwhile been consumed by a newer
@@ -58,7 +58,7 @@ async function createShippedOrder(
 
   const lineResponse = await apiRequest(request, 'POST', '/api/sales/order-lines', {
     token,
-    data: { orderId, currencyCode: 'USD', quantity, name: `TC-SALES-043 ${Date.now()}`, unitPriceNet: 40, unitPriceGross: 40 },
+    data: { orderId, currencyCode: 'USD', quantity, name: `TC-SALES-049 ${Date.now()}`, unitPriceNet: 40, unitPriceGross: 40 },
   })
   expect(lineResponse.status()).toBe(201)
   const orderLineId = (await readJson(lineResponse)).id as string
@@ -75,7 +75,7 @@ async function createReturn(
 ): Promise<{ returnId: string; response: APIResponse }> {
   const response = await apiRequest(request, 'POST', '/api/sales/returns', {
     token,
-    data: { orderId, reason: `TC-SALES-043 ${Date.now()}`, lines: [{ orderLineId, quantity }] },
+    data: { orderId, reason: `TC-SALES-049 ${Date.now()}`, lines: [{ orderLineId, quantity }] },
   })
   expect(response.status(), 'POST /api/sales/returns should be 201').toBe(201)
   const returnId = (await readJson(response)).id as string
@@ -144,7 +144,7 @@ async function expectRestoreRefused(response: APIResponse, context: string): Pro
   expect(String(body.error)).not.toMatch(/^sales\.returns\./)
 }
 
-test.describe('TC-SALES-043 restoring a return re-checks returnable quantity', () => {
+test.describe('TC-SALES-049 restoring a return re-checks returnable quantity', () => {
   test('create redo is refused after a replacement return, then succeeds once capacity is freed', async ({ request }) => {
     skipIfUndoTestsDisabled()
     test.slow()
