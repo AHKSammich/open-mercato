@@ -115,6 +115,7 @@ function buildService(transaction: GatewayTransaction, results: AdapterResults) 
     }),
     flush,
     transactional: jest.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(em)),
+    fork: jest.fn(() => em),
   }
   const integrationCredentialsService = { resolve: jest.fn(async () => ({})) } as never
 
