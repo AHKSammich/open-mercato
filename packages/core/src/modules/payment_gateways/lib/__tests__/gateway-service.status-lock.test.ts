@@ -154,7 +154,7 @@ function buildHarness(input: { committed: TransactionRow; callerCopy: Transactio
     integrationCredentialsService: { resolve: jest.fn(async () => ({})) } as never,
     integrationLogService: integrationLogService as never,
   })
-  return { service, adapter, callerEm, forkEm, txFlush, callerFlush, integrationLogService }
+  return { service, adapter, callerEm, forkEm, txFlush, callerFlush, integrationLogService, operations }
 }
 
 function findCallsWith(predicate: (options: FindOptions, targetEm: unknown) => boolean) {
@@ -238,6 +238,25 @@ describe('payment gateway service — status writers evaluate the locked committ
       expect(findCallsWith((options, targetEm) => options?.refresh === true && targetEm === harness.callerEm)).toHaveLength(1)
       expect(callerCopy.unifiedStatus).toBe('captured')
     })
+
+    it('still announces a committed transition when re-reading the caller copy fails', async () => {
+      const committed = makeRow('authorized')
+      const harness = buildHarness({ committed, callerCopy: makeRow('authorized') })
+      harness.adapter.getStatus.mockResolvedValue({ status: 'captured' })
+      const harnessFind = findOneMock.getMockImplementation()
+      findOneMock.mockImplementation(async (targetEm, entity, where, options) => {
+        if ((options as FindOptions)?.refresh && targetEm === harness.callerEm) {
+          throw new Error('[internal] re-read failed')
+        }
+        return harnessFind!(targetEm, entity, where, options)
+      })
+
+      await expect(harness.service.getPaymentStatus('txn_1', scope)).resolves.toEqual({ status: 'captured' })
+
+      expect(committed.unifiedStatus).toBe('captured')
+      expect(emit).toHaveBeenCalledTimes(1)
+      expect(emit.mock.calls[0][0]).toBe('payment_gateways.payment.captured')
+    })
   })
 
   describe('webhook sync', () => {
@@ -305,6 +324,11 @@ describe('payment gateway service — status writers evaluate the locked committ
       expect(emit).not.toHaveBeenCalled()
       expect(committed.unifiedStatus).toBe('cancelled')
       expect(committed.gatewayMetadata).toEqual({ captureResult: { captureMarker: true } })
+      expect(committed.capturedAmount).toBe('100.0000')
+      expect(harness.adapter.capture).toHaveBeenCalledTimes(1)
+      expect(Array.from(harness.operations.values())).toEqual([
+        expect.objectContaining({ operationId: 'capture-after-cancel', status: 'succeeded' }),
+      ])
       expect(harness.integrationLogService.write).toHaveBeenCalledWith(
         expect.objectContaining({
           level: 'warn',

@@ -1,3 +1,19 @@
+/**
+ * Real-PostgreSQL race harness for the payment gateway status writers: the status poller
+ * worker, the inbound webhook job and manual capture / cancel completion, each on its own
+ * forked entity manager, racing on one `gateway_transactions` row. Deterministic cases gate the
+ * provider call to force an interleaving; the jittered cases repeat each pairing and fail on any
+ * lost update (status, metadata) or duplicate / stale status event.
+ *
+ * Gated on OM_PAYMENT_GATEWAYS_RACE_DATABASE_URL — a throwaway database, since the suite drops
+ * and recreates the payment gateway tables. Run it with, for example:
+ *
+ *   docker run -d --rm --name om-pgw-race -e POSTGRES_PASSWORD=race -e POSTGRES_USER=race \
+ *     -e POSTGRES_DB=race -p 55473:5432 postgres:16-alpine
+ *   OM_PAYMENT_GATEWAYS_RACE_DATABASE_URL=postgres://race:race@127.0.0.1:55473/race \
+ *     OM_PAYMENT_GATEWAYS_RACE_ROUNDS=200 OM_PAYMENT_GATEWAYS_RACE_PARALLEL=20 \
+ *     yarn workspace @open-mercato/core jest gateway-service.status-race.pg
+ */
 import 'reflect-metadata'
 import { randomUUID } from 'node:crypto'
 import { ReflectMetadataProvider } from '@mikro-orm/decorators/legacy'
@@ -34,6 +50,8 @@ type ProviderSession = {
   onPollStarted: (() => void) | null
   maxDelayMs: number
   captureAmount: number | null
+  captureGate: Promise<void> | null
+  onCaptureStarted: (() => void) | null
 }
 
 type EmittedEvent = { id: string; transactionId: string }
@@ -59,6 +77,8 @@ const raceAdapter: GatewayAdapter = {
   },
   async capture(input) {
     const session = readSession(input.sessionId)
+    session.onCaptureStarted?.()
+    if (session.captureGate) await session.captureGate
     await delay(session.maxDelayMs)
     return {
       status: 'captured',
@@ -170,6 +190,8 @@ async function seedTransaction(status: UnifiedPaymentStatus, session: Partial<Pr
     onPollStarted: null,
     maxDelayMs: 0,
     captureAmount: null,
+    captureGate: null,
+    onCaptureStarted: null,
     ...session,
   })
   const transaction = em.create(GatewayTransaction, {
@@ -318,6 +340,24 @@ describeWithDatabase('payment gateway status poll vs concurrent writers (real Po
       expect(row.unifiedStatus).toBe('captured')
       expect(row.capturedAmount).toBe('90.0000')
       expect(eventsFor(txn.id)).toEqual(['captured'])
+    })
+
+    it('manual capture completes without overriding a cancellation committed while the provider captured', async () => {
+      const gate = deferred()
+      const started = deferred()
+      const txn = await seedTransaction('authorized', { captureGate: gate.promise, onCaptureStarted: started.resolve })
+      const capture = manualCapture(txn)
+      await started.promise
+      await deliverWebhook(txn, 'cancelled', 'cancelWebhookMarker')
+      gate.resolve()
+      await capture
+      const row = await readTransaction(txn.id)
+      expect(row.unifiedStatus).toBe('cancelled')
+      expect(row.capturedAmount).toBe('100.0000')
+      expect(row.gatewayMetadata).toEqual(expect.objectContaining({ cancelWebhookMarker: true }))
+      expect(eventsFor(txn.id)).toEqual(['cancelled'])
+      const operations = await orm.em.fork().find(GatewayPaymentOperation, { transactionId: txn.id })
+      expect(operations.map((operation) => operation.status)).toEqual(['succeeded'])
     })
   })
 

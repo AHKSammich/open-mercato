@@ -295,8 +295,6 @@ export function createPaymentGatewayService(deps: PaymentGatewayServiceDeps) {
             lockMode: LockMode.PESSIMISTIC_WRITE,
             refresh: true,
           })
-          // The provider already acted, so a status another writer committed meanwhile must not
-          // turn an incompatible result into a failed operation.
           const outcome = applyAdapterResultStatus(input.action, current, result.status, {
             tolerateIncompatible: current.unifiedStatus !== startedFrom,
           })
@@ -770,6 +768,15 @@ export function createPaymentGatewayService(deps: PaymentGatewayServiceDeps) {
         return status
       }
 
+      try {
+        await findTransactionOrThrow(transactionId, scope, em, { refresh: true })
+      } catch (refreshError) {
+        logger.warn('Failed to re-read transaction after a polled status update', {
+          transactionId,
+          providerKey: transaction.providerKey,
+          err: refreshError,
+        })
+      }
       await emitStatusEvent(status.status, {
         transactionId: transaction.id,
         paymentId: transaction.paymentId,
@@ -789,7 +796,6 @@ export function createPaymentGatewayService(deps: PaymentGatewayServiceDeps) {
           nextStatus: status.status,
         },
       )
-      await findTransactionOrThrow(transactionId, scope, em, { refresh: true })
 
       return status
     },
