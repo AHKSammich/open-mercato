@@ -11,7 +11,7 @@ import {
 } from './helpers/fixtures'
 
 /**
- * TC-CHKT-044: Pay-link usage counters stay equal to the link's transactions.
+ * TC-CHKT-046: Pay-link usage counters stay equal to the link's transactions.
  *
  * The example mock gateway captures every session immediately, so each accepted
  * submit reserves a usage slot and completes it inside one request. Parallel submits
@@ -28,7 +28,7 @@ async function payInParallel(request: APIRequestContext, slug: string, count: nu
   return Promise.all(Array.from({ length: count }, () => submitPayLink(request, slug, PAYMENT)))
 }
 
-test.describe('TC-CHKT-044: Pay-link usage counters under concurrent payments and undo', () => {
+test.describe('TC-CHKT-046: Pay-link usage counters under concurrent payments and undo', () => {
   test('parallel payments on one link are all counted and release their reservations', async ({ request }) => {
     const token = await getAuthToken(request)
     let linkId: string | null = null
@@ -58,7 +58,7 @@ test.describe('TC-CHKT-044: Pay-link usage counters under concurrent payments an
         maxCompletions: 2,
       }))
       linkId = link.id
-      const idempotencyKey = `tc-chkt-044-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      const idempotencyKey = `tc-chkt-046-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
       const responses = await Promise.all([
         submitPayLink(request, link.slug, PAYMENT, { idempotencyKey }),
