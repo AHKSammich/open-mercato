@@ -1,6 +1,6 @@
 import type { EntityData } from '@mikro-orm/core'
 import type { EntityManager } from '@mikro-orm/postgresql'
-import { SsoIdentity, SsoRoleGrant, SsoUserDeactivation } from '../data/entities'
+import { SsoIdentity, SsoRoleGrant } from '../data/entities'
 
 export const metadata = {
   event: 'auth.user.deleted',
@@ -9,27 +9,37 @@ export const metadata = {
 }
 
 type UserDeletedPayload = {
-  userId: string
-  tenantId: string
-  organizationId: string
+  id?: string
+  tenantId?: string | null
+  organizationId?: string | null
 }
 
 type ResolverContext = {
   resolve: <T = unknown>(name: string) => T
+  tenantId?: string | null
+  organizationId?: string | null
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 export default async function handle(payload: UserDeletedPayload, ctx: ResolverContext) {
-  const em = ctx.resolve<EntityManager>('em')
+  const userId = nonEmptyString(payload?.id)
+  if (!userId) return
+  const tenantId = nonEmptyString(ctx?.tenantId) ?? nonEmptyString(payload?.tenantId)
+  if (!tenantId) return
+
+  const scope = { userId, $or: [{ tenantId }, { tenantId: null }] }
+  const em = ctx.resolve<EntityManager>('em').fork()
 
   await em.transactional(async (txEm) => {
     await txEm.nativeUpdate(
       SsoIdentity,
-      { userId: payload.userId, deletedAt: null },
+      { ...scope, deletedAt: null },
       { deletedAt: new Date() } as EntityData<SsoIdentity>,
     )
 
-    await txEm.nativeDelete(SsoRoleGrant, { userId: payload.userId })
-
-    await txEm.nativeDelete(SsoUserDeactivation, { userId: payload.userId })
+    await txEm.nativeDelete(SsoRoleGrant, scope)
   })
 }

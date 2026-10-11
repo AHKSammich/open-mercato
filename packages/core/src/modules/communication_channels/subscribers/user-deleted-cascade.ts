@@ -1,6 +1,7 @@
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { findWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { CommunicationChannel } from '../data/entities'
+import { emitCommunicationChannelsEvent } from '../events'
 
 /**
  * Subscriber: cascade-disconnect a user's communication channels when the user
@@ -12,24 +13,27 @@ import { CommunicationChannel } from '../data/entities'
  * cascade must therefore happen at the event-bridge layer, here, in response
  * to the auth module's lifecycle event.
  *
+ * Scope: the deleted user's id (`payload.id`) within the event's tenant
+ * (envelope tenant first, payload tenant as fallback). Channels in every
+ * organization of that tenant are matched. Without a tenant the subscriber
+ * does nothing (fail closed).
+ *
  * Effects per matched channel:
- *   1. `status = 'disconnected'`        — stops the polling worker (slice 3b
- *                                          skips channels not in `connected`).
- *   2. `is_active = false`              — hides the channel from the hub admin
- *                                          UI and stops adapter resolution.
- *   3. `credentials_ref = null`         — orphans the encrypted credentials
- *                                          blob in `integration_credentials`
- *                                          (the integrations module's own
- *                                          retention policy then sweeps it).
- *   4. `last_error = 'user-deleted'`    — diagnostic breadcrumb.
+ *   1. `status = 'disconnected'`, `is_active = false`, `is_primary = false`
+ *      — stops polling, push-watch renewal and adapter resolution.
+ *   2. `credentials_ref = null` — detaches the stored credentials. The
+ *      `integration_credentials` row itself is not swept here (known
+ *      follow-up).
+ *   3. `last_error = 'user-deleted'` — diagnostic breadcrumb.
+ *   4. `communication_channels.channel.disconnected` is emitted after the
+ *      flush, with the same payload as the user-initiated disconnect.
  *
- * The channel row itself is NOT hard-deleted — keeping it preserves the audit
- * trail of which user owned it and the conversation history that still lives
- * in `external_messages` / `messages`. A future tenant-level GDPR sweep can
- * hard-delete on a schedule.
+ * The provider-side watch (e.g. Gmail) is not stopped here; it is no longer
+ * renewed because the channel is inactive and expires on its own. The channel
+ * row and already ingested mail are retained for the audit trail.
  *
- * Idempotency: the update is conditional on `status != 'disconnected'`, so
- * replays from the event bus are no-ops.
+ * Idempotency: channels already disconnected and inactive are skipped, so
+ * event-bus replays neither re-flush nor re-emit.
  */
 export const metadata = {
   event: 'auth.user.deleted',
@@ -38,53 +42,42 @@ export const metadata = {
 }
 
 type AuthUserDeletedPayload = {
-  userId: string
-  tenantId?: string
+  id?: string
+  tenantId?: string | null
   organizationId?: string | null
 }
 
 type SubscriberContext = {
   resolve: <T = unknown>(name: string) => T
+  tenantId?: string | null
+  organizationId?: string | null
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 export default async function handler(
   payload: AuthUserDeletedPayload,
   ctx: SubscriberContext,
 ): Promise<void> {
-  if (!payload || typeof payload.userId !== 'string' || !payload.userId) {
-    return
-  }
-  // tenantId MUST be present: an unscoped cascade would touch rows in arbitrary
-  // tenants if two tenants ever happened to share a userId (impossible under
-  // UUIDv4 but possible after backup-restore). Fail-closed: skip when missing
-  // and let an out-of-band sweep clean up.
-  if (typeof payload.tenantId !== 'string' || !payload.tenantId) {
-    return
-  }
+  const userId = nonEmptyString(payload?.id)
+  if (!userId) return
+  const tenantId = nonEmptyString(ctx?.tenantId) ?? nonEmptyString(payload?.tenantId)
+  if (!tenantId) return
   const em = (ctx.resolve('em') as EntityManager).fork()
 
   const channels = await findWithDecryption(
     em,
     CommunicationChannel,
-    {
-      userId: payload.userId,
-      tenantId: payload.tenantId,
-      ...(payload.organizationId !== undefined
-        ? { organizationId: payload.organizationId ?? null }
-        : {}),
-      deletedAt: null,
-    },
+    { userId, tenantId, deletedAt: null },
     undefined,
-    {
-      tenantId: payload.tenantId,
-      organizationId: payload.organizationId ?? null,
-    },
+    { tenantId, organizationId: null },
   )
   if (channels.length === 0) return
 
-  let touched = 0
+  const touched: CommunicationChannel[] = []
   for (const channel of channels) {
-    // Already disconnected → idempotent skip.
     if (channel.status === 'disconnected' && channel.isActive === false) continue
     channel.status = 'disconnected'
     channel.isActive = false
@@ -92,9 +85,23 @@ export default async function handler(
     channel.lastError = 'user-deleted'
     channel.isPrimary = false
     channel.lastPolledAt = new Date()
-    touched += 1
+    touched.push(channel)
   }
-  if (touched > 0) {
-    await em.flush()
+  if (touched.length === 0) return
+  await em.flush()
+
+  for (const channel of touched) {
+    await emitCommunicationChannelsEvent(
+      'communication_channels.channel.disconnected',
+      {
+        channelId: channel.id,
+        userId,
+        providerKey: channel.providerKey,
+        channelType: channel.channelType,
+        tenantId: channel.tenantId,
+        organizationId: channel.organizationId ?? null,
+      },
+      { persistent: true },
+    )
   }
 }

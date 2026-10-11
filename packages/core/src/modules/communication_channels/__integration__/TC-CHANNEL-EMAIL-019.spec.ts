@@ -8,8 +8,8 @@ import { apiRequest } from '@open-mercato/core/helpers/integration/api'
  * The cascade subscriber `subscribers/user-deleted-cascade.ts` reacts to
  * `auth.user.deleted` by disconnecting every owned channel. The profile page
  * empty-state must still render cleanly after this — we exercise the route
- * surface here; the per-user assertion is covered by the subscriber unit
- * tests at `subscribers/__tests__/user-deleted-cascade.test.ts`.
+ * surface here only. The per-user cascade (deleting a user disconnects the
+ * channels they own) is covered end to end by TC-CHANNEL-EMAIL-033.
  */
 test.describe('TC-CHANNEL-EMAIL-019: auth.user.deleted cascade keeps profile page healthy', () => {
   test('GET /backend/profile/communication-channels does not 5xx', async ({ request }) => {
