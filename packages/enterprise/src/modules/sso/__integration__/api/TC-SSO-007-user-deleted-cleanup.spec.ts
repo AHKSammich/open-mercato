@@ -20,7 +20,7 @@ import {
  * not re-provision the same `externalId` after the platform user was deleted (unique conflict).
  */
 
-type IdentityRow = { id: string; user_id: string; tenant_id: string | null; deleted_at: string | null }
+type IdentityRow = { id: string; user_id: string; tenant_id: string | null; organization_id: string; deleted_at: string | null }
 
 async function identityUserId(identityId: string): Promise<string> {
   return withClient(async (client) => {
@@ -34,7 +34,7 @@ async function identityUserId(identityId: string): Promise<string> {
 async function identitiesOf(userId: string): Promise<IdentityRow[]> {
   return withClient(async (client) => {
     const result = await client.query<IdentityRow>(
-      'select id, user_id, tenant_id, deleted_at from sso_identities where user_id = $1',
+      'select id, user_id, tenant_id, organization_id, deleted_at from sso_identities where user_id = $1',
       [userId],
     )
     return result.rows
@@ -86,18 +86,15 @@ test.describe('TC-SSO-007: user deletion cleans up SSO identities and role grant
       const [scimIdentity] = await identitiesOf(deletedUserId)
       expect(scimIdentity, 'the SCIM user has an identity').toBeTruthy()
       await withClient(async (client) => {
+        await client.query('update sso_identities set tenant_id = null where id = $1', [scimIdentity.id])
         await client.query(
-          `insert into sso_identities (tenant_id, organization_id, sso_config_id, user_id, idp_subject, idp_email, provisioning_method, created_at, updated_at)
-           select null, organization_id, sso_config_id, user_id, $2, idp_email, provisioning_method, now(), now() from sso_identities where id = $1`,
-          [scimIdentity.id, `tc-sso-007-null-tenant-${stamp}`],
-        )
-        await client.query(
-          `insert into sso_role_grants (tenant_id, user_id, role_id, sso_config_id, created_at)
-           values ($1, $2, gen_random_uuid(), $3, now()), (null, $2, gen_random_uuid(), $3, now()), ($1, $4, gen_random_uuid(), $3, now())`,
-          [scimIdentity.tenant_id, deletedUserId, configId, keptUserId],
+          `insert into sso_role_grants (tenant_id, organization_id, user_id, role_id, sso_config_id, created_at)
+           values ($1, $5, $2, gen_random_uuid(), $3, now()), (null, $5, $2, gen_random_uuid(), $3, now()), ($1, $5, $4, gen_random_uuid(), $3, now())`,
+          [scimIdentity.tenant_id, deletedUserId, configId, keptUserId, scimIdentity.organization_id],
         )
       })
-      expect((await identitiesOf(deletedUserId)).filter((row) => !row.deleted_at), 'two live identities before delete').toHaveLength(2)
+      const liveBefore = (await identitiesOf(deletedUserId)).filter((row) => !row.deleted_at)
+      expect(liveBefore.map((row) => row.tenant_id), 'one live NULL-tenant identity before delete').toEqual([null])
       expect(await roleGrantCount(deletedUserId), 'two role grants before delete').toBe(2)
 
       const deleteResponse = await apiRequest(request, 'DELETE', `/api/auth/users?id=${encodeURIComponent(deletedUserId)}`, { token })
