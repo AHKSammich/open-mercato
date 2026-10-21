@@ -92,7 +92,7 @@ function referenceId(value: string | { id: string }): string {
 
 async function removeTagAssignments(em: EntityManager, tag: CustomerTag): Promise<TagAssignmentRestoreSnapshot[]> {
   const scope = { organizationId: tag.organizationId, tenantId: tag.tenantId }
-  const assignments = await findWithDecryption(em, CustomerTagAssignment, { tag }, { orderBy: { id: 'asc' } }, scope)
+  const assignments = await findWithDecryption(em, CustomerTagAssignment, { tag, ...scope }, { orderBy: { id: 'asc' } }, scope)
   await em.nativeDelete(CustomerTagAssignment, { tag })
   return assignments.map((row) => ({
     id: row.id,
@@ -117,7 +117,7 @@ async function restoreTagAssignments(
     scope,
   )
   const entitiesById = new Map(entities.map((entity) => [entity.id, entity]))
-  const existing = await findWithDecryption(em, CustomerTagAssignment, { tag, entity: { $in: entityIds } }, undefined, scope)
+  const existing = await findWithDecryption(em, CustomerTagAssignment, { tag, entity: { $in: entityIds }, ...scope }, undefined, scope)
   const assignedEntityIds = new Set(existing.map((row) => referenceId(row.entity)))
   for (const row of snapshot) {
     const entity = entitiesById.get(row.entityId)
