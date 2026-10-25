@@ -216,7 +216,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await page.getByRole('button', { name: 'Save' }).first().click()
       const createResponse = await createResponsePromise
       expect(createResponse.status(), 'resource type create from the form').toBe(201)
-      const typeId = ((await readJsonSafe(createResponse)) as { id: string }).id
+      const typeId = ((await createResponse.json()) as { id: string }).id
       typeIds.push(typeId)
       await expect(page).toHaveURL(/\/backend\/resources\/resource-types$/)
 
