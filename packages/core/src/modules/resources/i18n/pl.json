@@ -443,6 +443,8 @@
   "resources.resources.detail.tabs.activities": "Działania",
   "resources.resources.detail.tabs.notes": "Notatki",
   "resources.resources.detail.untitled": "Nienazwany zasób",
+  "resources.resources.errors.resourceTypeDeleted": "Typ tego zasobu został usunięty. Najpierw cofnij usunięcie typu zasobu.",
+  "resources.resources.errors.resourceTypeUnavailable": "Wybrany typ zasobu nie jest już dostępny.",
   "resources.resources.flash.createdAvailability": "Zapisano. Możesz teraz ustawić dostępność.",
   "resources.resources.form.actions.create": "Utwórz",
   "resources.resources.form.appearance.colorClear": "Wyczyść kolor",

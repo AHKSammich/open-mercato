@@ -1,0 +1,253 @@
+/** @jest-environment node */
+
+import { commandRegistry } from '@open-mercato/shared/lib/commands/registry'
+import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
+import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
+import { ResourcesResourceType } from '../../data/entities'
+
+jest.mock('@open-mercato/shared/lib/i18n/server', () => ({
+  resolveTranslations: async () => ({
+    locale: 'en',
+    dict: {},
+    t: (key: string) => key,
+    translate: (key: string, fallback?: string) => fallback ?? key,
+  }),
+}))
+
+jest.mock('@open-mercato/shared/lib/encryption/find', () => ({
+  findOneWithDecryption: jest.fn().mockResolvedValue(null),
+  findWithDecryption: jest.fn().mockResolvedValue([]),
+}))
+
+jest.mock('@open-mercato/shared/lib/commands/helpers', () => {
+  const actual = jest.requireActual('@open-mercato/shared/lib/commands/helpers')
+  return {
+    ...actual,
+    emitCrudSideEffects: jest.fn().mockResolvedValue(undefined),
+    emitCrudUndoSideEffects: jest.fn().mockResolvedValue(undefined),
+    setCustomFieldsIfAny: jest.fn().mockResolvedValue(undefined),
+  }
+})
+
+const TEST_TENANT_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+const TEST_ORG_ID = 'bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb'
+const TEST_RESOURCE_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const TEST_TYPE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const OTHER_TYPE_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+
+const UNAVAILABLE_BODY = { error: 'The selected resource type is no longer available.' }
+const DELETED_BODY = {
+  error: 'The resource type of this resource was deleted. Undo the resource type deletion first.',
+  code: 'resources.resources.errors.resourceTypeDeleted',
+}
+
+function buildSnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    id: TEST_RESOURCE_ID,
+    tenantId: TEST_TENANT_ID,
+    organizationId: TEST_ORG_ID,
+    name: 'Resource A',
+    description: null,
+    resourceTypeId: TEST_TYPE_ID,
+    capacity: null,
+    capacityUnitValue: null,
+    capacityUnitName: null,
+    capacityUnitColor: null,
+    capacityUnitIcon: null,
+    appearanceIcon: null,
+    appearanceColor: null,
+    isActive: true,
+    availabilityRuleSetId: null,
+    customFieldsetCode: null,
+    tags: [] as string[],
+    deletedAt: null,
+    ...overrides,
+  }
+}
+
+function buildEnvelope(options: { record?: Record<string, unknown> | null; liveTypeIds?: string[] } = {}) {
+  const liveTypeIds = new Set(options.liveTypeIds ?? [])
+  const em = {
+    begin: jest.fn().mockResolvedValue(undefined),
+    commit: jest.fn().mockResolvedValue(undefined),
+    rollback: jest.fn().mockResolvedValue(undefined),
+    flush: jest.fn().mockResolvedValue(undefined),
+    persist: jest.fn(),
+    nativeDelete: jest.fn().mockResolvedValue(undefined),
+    find: jest.fn().mockResolvedValue([]),
+    findOne: jest.fn().mockResolvedValue(options.record ?? null),
+    count: jest.fn().mockImplementation(async (_entity: unknown, where: { id: string; tenantId: string; organizationId: string }) =>
+      liveTypeIds.has(where.id) && where.tenantId === TEST_TENANT_ID && where.organizationId === TEST_ORG_ID ? 1 : 0,
+    ),
+    getReference: jest.fn((_entity: unknown, id: string) => ({ id })),
+    create: jest.fn((_entity: unknown, data: Record<string, unknown>) => ({ id: TEST_RESOURCE_ID, ...data })),
+  }
+  const ctx = {
+    container: {
+      resolve: jest.fn().mockImplementation((name: string) => {
+        if (name === 'em') return { fork: jest.fn().mockReturnValue(em) }
+        return {}
+      }),
+    },
+    auth: { tenantId: TEST_TENANT_ID, orgId: TEST_ORG_ID, isSuperAdmin: true, sub: 'user-1' },
+    selectedOrganizationId: TEST_ORG_ID,
+    organizationIds: [TEST_ORG_ID],
+    request: {} as Request,
+    organizationScope: null,
+  }
+  return { em, ctx }
+}
+
+function asLogEntry(commandPayload: unknown) {
+  return { commandPayload } as any
+}
+
+async function captureFailure(promise: Promise<unknown>): Promise<CrudHttpError> {
+  const failure = await promise.then(() => null, (err: unknown) => err)
+  expect(failure).toBeInstanceOf(CrudHttpError)
+  return failure as CrudHttpError
+}
+
+describe('resources commands — resource type must be live', () => {
+  beforeAll(async () => {
+    commandRegistry.clear?.()
+    await import('../resources')
+  })
+
+  beforeEach(() => {
+    ;(findOneWithDecryption as jest.Mock).mockReset().mockResolvedValue(null)
+  })
+
+  it('create rejects a resource type that is deleted, unknown or outside the organization', async () => {
+    const { em, ctx } = buildEnvelope()
+    const handler = commandRegistry.get('resources.resources.create')
+
+    const failure = await captureFailure(
+      handler!.execute(
+        { tenantId: TEST_TENANT_ID, organizationId: TEST_ORG_ID, name: 'Resource A', resourceTypeId: TEST_TYPE_ID },
+        ctx as any,
+      ),
+    )
+
+    expect(failure.status).toBe(400)
+    expect(failure.body).toEqual(UNAVAILABLE_BODY)
+    expect(em.count).toHaveBeenCalledWith(ResourcesResourceType, {
+      id: TEST_TYPE_ID,
+      tenantId: TEST_TENANT_ID,
+      organizationId: TEST_ORG_ID,
+      deletedAt: null,
+    })
+    expect(em.persist).not.toHaveBeenCalled()
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('create accepts a live resource type of the same organization', async () => {
+    const { em, ctx } = buildEnvelope({ liveTypeIds: [TEST_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.create')
+
+    await expect(
+      handler!.execute(
+        { tenantId: TEST_TENANT_ID, organizationId: TEST_ORG_ID, name: 'Resource A', resourceTypeId: TEST_TYPE_ID },
+        ctx as any,
+      ),
+    ).resolves.toEqual({ resourceId: TEST_RESOURCE_ID })
+    expect(em.commit).toHaveBeenCalledTimes(1)
+  })
+
+  it('update rejects switching to an unavailable resource type', async () => {
+    const record = buildSnapshot({ resourceTypeId: null })
+    ;(findOneWithDecryption as jest.Mock).mockResolvedValue(record)
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.update')
+
+    const failure = await captureFailure(
+      handler!.execute({ id: TEST_RESOURCE_ID, resourceTypeId: OTHER_TYPE_ID }, ctx as any),
+    )
+
+    expect(failure.status).toBe(400)
+    expect(failure.body).toEqual(UNAVAILABLE_BODY)
+    expect(record.resourceTypeId).toBeNull()
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('update keeps resources whose stored type is already deleted editable', async () => {
+    const record = buildSnapshot()
+    ;(findOneWithDecryption as jest.Mock).mockResolvedValue(record)
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.update')
+
+    await expect(
+      handler!.execute({ id: TEST_RESOURCE_ID, name: 'Renamed', resourceTypeId: TEST_TYPE_ID }, ctx as any),
+    ).resolves.toEqual({ resourceId: TEST_RESOURCE_ID })
+    expect(em.count).not.toHaveBeenCalled()
+    expect(record.name).toBe('Renamed')
+  })
+
+  it('delete undo refuses to restore a resource whose type was deleted meanwhile', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.delete')
+
+    const failure = await captureFailure(
+      handler!.undo!({ logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx } as any),
+    )
+
+    expect(failure.status).toBe(409)
+    expect(failure.body).toEqual(DELETED_BODY)
+    expect(record.deletedAt).toBeInstanceOf(Date)
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('delete undo restores the resource while its type is still live', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { ctx } = buildEnvelope({ record, liveTypeIds: [TEST_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.delete')
+
+    await handler!.undo!({ logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx } as any)
+
+    expect(record.deletedAt).toBeNull()
+  })
+
+  it('update undo refuses to move a resource back to a deleted type', async () => {
+    const record = buildSnapshot({ resourceTypeId: OTHER_TYPE_ID })
+    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [OTHER_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.update')
+    const logEntry = asLogEntry({
+      undo: { before: buildSnapshot(), after: buildSnapshot({ resourceTypeId: OTHER_TYPE_ID }) },
+    })
+
+    const failure = await captureFailure(handler!.undo!({ logEntry, ctx } as any))
+
+    expect(failure.status).toBe(409)
+    expect(failure.body).toEqual(DELETED_BODY)
+    expect(record.resourceTypeId).toBe(OTHER_TYPE_ID)
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('update undo with an unchanged type does not re-check it', async () => {
+    const record = buildSnapshot({ name: 'Renamed' })
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.update')
+    const logEntry = asLogEntry({ undo: { before: buildSnapshot(), after: buildSnapshot({ name: 'Renamed' }) } })
+
+    await handler!.undo!({ logEntry, ctx } as any)
+
+    expect(em.count).not.toHaveBeenCalled()
+    expect(record.name).toBe('Resource A')
+  })
+
+  it('create redo refuses to re-create a resource whose type was deleted meanwhile', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.create')
+
+    const failure = await captureFailure(
+      handler!.redo!({ logEntry: asLogEntry({ undo: { after: buildSnapshot() } }), ctx } as any),
+    )
+
+    expect(failure.status).toBe(409)
+    expect(failure.body).toEqual(DELETED_BODY)
+    expect(record.deletedAt).toBeInstanceOf(Date)
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+})

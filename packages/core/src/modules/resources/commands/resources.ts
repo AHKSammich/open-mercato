@@ -11,7 +11,7 @@ import type { DataEngine } from '@open-mercato/shared/lib/data/engine'
 import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
 import type { CrudIndexerConfig } from '@open-mercato/shared/lib/crud/types'
 import { Dictionary, DictionaryEntry } from '@open-mercato/core/modules/dictionaries/data/entities'
-import { ResourcesResource, ResourcesResourceTag, ResourcesResourceTagAssignment } from '../data/entities'
+import { ResourcesResource, ResourcesResourceTag, ResourcesResourceTagAssignment, ResourcesResourceType } from '../data/entities'
 import {
   resourcesResourceCreateSchema,
   resourcesResourceUpdateSchema,
@@ -208,6 +208,49 @@ async function syncResourcesResourceTags(em: EntityManager, params: {
   }
 }
 
+type ResourceScope = { tenantId: string; organizationId: string }
+
+async function isLiveResourceType(em: EntityManager, resourceTypeId: string, scope: ResourceScope): Promise<boolean> {
+  const count = await em.count(ResourcesResourceType, {
+    id: resourceTypeId,
+    tenantId: scope.tenantId,
+    organizationId: scope.organizationId,
+    deletedAt: null,
+  })
+  return count > 0
+}
+
+async function assertResourceTypeAssignable(
+  em: EntityManager,
+  resourceTypeId: string | null | undefined,
+  scope: ResourceScope,
+): Promise<void> {
+  if (!resourceTypeId || await isLiveResourceType(em, resourceTypeId, scope)) return
+  const { translate } = await resolveTranslations()
+  throw new CrudHttpError(400, {
+    error: translate('resources.resources.errors.resourceTypeUnavailable', 'The selected resource type is no longer available.'),
+  })
+}
+
+async function assertResourceTypeRestorable(
+  em: EntityManager,
+  record: ResourcesResource | null,
+  resourceTypeId: string | null | undefined,
+  scope: ResourceScope,
+): Promise<void> {
+  if (!resourceTypeId) return
+  if (record && !record.deletedAt && record.resourceTypeId === resourceTypeId) return
+  if (await isLiveResourceType(em, resourceTypeId, scope)) return
+  const { translate } = await resolveTranslations()
+  throw new CrudHttpError(409, {
+    error: translate(
+      'resources.resources.errors.resourceTypeDeleted',
+      'The resource type of this resource was deleted. Undo the resource type deletion first.',
+    ),
+    code: 'resources.resources.errors.resourceTypeDeleted',
+  })
+}
+
 const createResourceCommand: CommandHandler<ResourcesResourceCreateInput, { resourceId: string }> = {
   id: 'resources.resources.create',
   async execute(rawInput, ctx) {
@@ -216,6 +259,7 @@ const createResourceCommand: CommandHandler<ResourcesResourceCreateInput, { reso
     ensureOrganizationScope(ctx, parsed.organizationId)
 
     const em = (ctx.container.resolve('em') as EntityManager).fork()
+    await assertResourceTypeAssignable(em, parsed.resourceTypeId, parsed)
     const now = new Date()
     const unitValue =
       typeof parsed.capacityUnitValue === 'string' ? parsed.capacityUnitValue.trim() : ''
@@ -342,6 +386,7 @@ const createResourceCommand: CommandHandler<ResourcesResourceCreateInput, { reso
     const fallbackCustomAfter = (after as ResourceSnapshot).customFields ?? null
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     let record = await em.findOne(ResourcesResource, { id: after.id })
+    await assertResourceTypeRestorable(em, record, after.resourceTypeId, after)
     await withAtomicFlush(em, [
       async () => {
         if (!record) {
@@ -448,6 +493,9 @@ const updateResourceCommand: CommandHandler<ResourcesResourceUpdateInput, { reso
     if (!record) throw new CrudHttpError(404, { error: 'Resources resource not found.' })
     ensureTenantScope(ctx, record.tenantId)
     ensureOrganizationScope(ctx, record.organizationId)
+    if (parsed.resourceTypeId !== undefined && parsed.resourceTypeId !== record.resourceTypeId) {
+      await assertResourceTypeAssignable(em, parsed.resourceTypeId, record)
+    }
 
     let capacityUnit: CapacityUnitSnapshot | null | undefined
     if (parsed.capacityUnitValue !== undefined) {
@@ -576,6 +624,7 @@ const updateResourceCommand: CommandHandler<ResourcesResourceUpdateInput, { reso
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const record = await em.findOne(ResourcesResource, { id: before.id })
     if (!record) return
+    if (!before.deletedAt) await assertResourceTypeRestorable(em, record, before.resourceTypeId, before)
     await withAtomicFlush(em, [
       () => {
         record.name = before.name
@@ -705,6 +754,7 @@ const deleteResourceCommand: CommandHandler<{ id?: string }, { resourceId: strin
     const fallbackCustomBefore = (before as ResourceSnapshot).customFields ?? null
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     let record = await em.findOne(ResourcesResource, { id: before.id })
+    await assertResourceTypeRestorable(em, record, before.resourceTypeId, before)
     await withAtomicFlush(em, [
       async () => {
         if (!record) {

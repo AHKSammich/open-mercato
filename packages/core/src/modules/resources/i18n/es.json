@@ -443,6 +443,8 @@
   "resources.resources.detail.tabs.activities": "Actividades",
   "resources.resources.detail.tabs.notes": "Notas",
   "resources.resources.detail.untitled": "Recurso sin nombre",
+  "resources.resources.errors.resourceTypeDeleted": "El tipo de recurso de este recurso se eliminó. Deshaz primero la eliminación del tipo de recurso.",
+  "resources.resources.errors.resourceTypeUnavailable": "El tipo de recurso seleccionado ya no está disponible.",
   "resources.resources.flash.createdAvailability": "Guardado. Ahora puedes establecer la disponibilidad.",
   "resources.resources.form.actions.create": "Crear",
   "resources.resources.form.appearance.colorClear": "Limpiar color",

@@ -72,6 +72,20 @@ async function loadResourceTypeCustomSnapshot(em: EntityManager, snapshot: Resou
   })
 }
 
+async function assertNoAssignedResources(em: EntityManager, resourceType: ResourcesResourceType): Promise<void> {
+  const assignedCount = await em.count(ResourcesResource, {
+    resourceTypeId: resourceType.id,
+    deletedAt: null,
+    tenantId: resourceType.tenantId,
+    organizationId: resourceType.organizationId,
+  })
+  if (assignedCount === 0) return
+  const { translate } = await resolveTranslations()
+  throw new CrudHttpError(400, {
+    error: translate('resources.resourceTypes.errors.deleteAssigned', 'Resource type has assigned resources.'),
+  })
+}
+
 const createResourceTypeCommand: CommandHandler<ResourcesResourceTypeCreateInput, { resourceTypeId: string }> = {
   id: 'resources.resourceTypes.create',
   async execute(rawInput, ctx) {
@@ -152,6 +166,7 @@ const createResourceTypeCommand: CommandHandler<ResourcesResourceTypeCreateInput
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const resourceType = await em.findOne(ResourcesResourceType, { id: after.id })
     if (resourceType) {
+      await assertNoAssignedResources(em, resourceType)
       resourceType.deletedAt = new Date()
       resourceType.updatedAt = new Date()
       await em.flush()
@@ -361,15 +376,7 @@ const deleteResourceTypeCommand: CommandHandler<{ id?: string }, { resourceTypeI
     if (!record) throw new CrudHttpError(404, { error: 'Resources resource type not found.' })
     ensureTenantScope(ctx, record.tenantId)
     ensureOrganizationScope(ctx, record.organizationId)
-    const assignedCount = await em.count(ResourcesResource, {
-      resourceTypeId: record.id,
-      deletedAt: null,
-      tenantId: record.tenantId,
-      organizationId: record.organizationId,
-    })
-    if (assignedCount > 0) {
-      throw new CrudHttpError(400, { error: 'Resource type has assigned resources.' })
-    }
+    await assertNoAssignedResources(em, record)
     record.deletedAt = new Date()
     record.updatedAt = new Date()
     await em.flush()
