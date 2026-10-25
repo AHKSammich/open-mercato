@@ -85,7 +85,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
 
       const undoRes = await undoByToken(request, token, type.operation.undoToken)
       expect(undoRes.status(), 'type create undo with an assigned resource').toBe(400)
-      expect(await readJsonSafe(undoRes)).toEqual({ error: ASSIGNED_ERROR })
+      expect(await readJsonSafe(undoRes)).toMatchObject({ error: ASSIGNED_ERROR })
       expect(await readItem(request, token, RESOURCE_TYPES, type.id), 'resource type stays live').not.toBeNull()
 
       const directDelete = await apiRequest(request, 'DELETE', `${RESOURCE_TYPES}?id=${encodeURIComponent(type.id)}`, { token })
@@ -115,7 +115,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
         data: { name: `QA RESO-012 resource ${stamp}`, resourceTypeId: deletedType.id },
       })
       expect(createRes.status(), 'create with a deleted type').toBe(400)
-      expect(await readJsonSafe(createRes)).toEqual({ error: UNAVAILABLE_ERROR })
+      expect(await readJsonSafe(createRes)).toMatchObject({ error: UNAVAILABLE_ERROR })
 
       const plainRes = await apiRequest(request, 'POST', RESOURCES, { token, data: { name: `QA RESO-012 plain ${stamp}` } })
       expect(plainRes.status(), 'create without a type').toBe(201)
@@ -128,7 +128,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
         headers: { 'Accept-Language': 'de' },
       })
       expect(updateRes.status(), 'update to a deleted type').toBe(400)
-      expect(await readJsonSafe(updateRes)).toEqual({ error: 'Der ausgewählte Ressourcentyp ist nicht mehr verfügbar.' })
+      expect(await readJsonSafe(updateRes)).toMatchObject({ error: 'Der ausgewählte Ressourcentyp ist nicht mehr verfügbar.' })
       const stored = await readItem(request, token, RESOURCES, resourceId)
       expect(stored?.resource_type_id ?? null, 'rejected update stored nothing').toBeNull()
     } finally {
@@ -136,7 +136,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
     }
   })
 
-  test('resource delete undo and create redo are refused while the resource type is deleted', async ({ request }) => {
+  test('resource delete undo, update undo and create redo are refused while the resource type is deleted', async ({ request }) => {
     let token: string | null = null
     const resourceIds: string[] = []
     const typeIds: string[] = []
@@ -160,6 +160,13 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       resourceIds.push(undoneResource)
       const resourceCreateOp = expectOperation(undoneCreateRes, 'second resource create')
       await undoOk(request, token, resourceCreateOp.undoToken, 'second resource create')
+      const otherType = await createResourceType(request, token, `QA RESO-012 other ${stamp}`)
+      typeIds.push(otherType.id)
+      const movedResource = await createResource(request, token, `QA RESO-012 moved ${stamp}`, type.id)
+      resourceIds.push(movedResource)
+      const moveRes = await apiRequest(request, 'PUT', RESOURCES, { token, data: { id: movedResource, resourceTypeId: otherType.id } })
+      expect(moveRes.status(), 'move resource to the other type').toBe(200)
+      const resourceUpdateOp = expectOperation(moveRes, 'move resource to the other type')
 
       const typeDeleteOp = expectOperation(await deleteById(request, token, RESOURCE_TYPES, type.id), 'resource type delete')
 
@@ -173,6 +180,12 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       expect(((await readJsonSafe(redoRes)) as { code?: string } | null)?.code).toBe(DELETED_CODE)
       expect(await readItem(request, token, RESOURCES, undoneResource), 'resource stays undone').toBeNull()
 
+      const updateUndoRes = await undoByToken(request, token, resourceUpdateOp.undoToken)
+      expect(updateUndoRes.status(), 'resource update undo back onto a deleted type').toBe(409)
+      expect(((await readJsonSafe(updateUndoRes)) as { code?: string } | null)?.code).toBe(DELETED_CODE)
+      const moved = await readItem(request, token, RESOURCES, movedResource)
+      expect(moved?.resource_type_id, 'moved resource keeps the live type').toBe(otherType.id)
+
       await undoOk(request, token, typeDeleteOp.undoToken, 'resource type delete')
       await undoOk(request, token, resourceDeleteOp.undoToken, 'resource delete once the type is back')
       const restored = await readItem(request, token, RESOURCES, deletedResource)
@@ -181,6 +194,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await cleanup(request, token, resourceIds, typeIds)
     }
   })
+
   test('the undo banner shows why a resource type create cannot be undone', async ({ page, request }) => {
     test.slow()
     let token: string | null = null
@@ -191,7 +205,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       const typeName = `QA RESO-012 ui type ${Date.now()}`
       await login(page, 'admin')
       await page.goto('/backend/resources/resource-types/create', { waitUntil: 'networkidle' })
-      const nameInput = page.getByRole('textbox').first()
+      const nameInput = page.locator('form').getByRole('textbox').first()
       await expect(async () => {
         await nameInput.fill(typeName)
         await expect(nameInput).toHaveValue(typeName, { timeout: 1_000 })
@@ -202,7 +216,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await page.getByRole('button', { name: 'Save' }).first().click()
       const createResponse = await createResponsePromise
       expect(createResponse.status(), 'resource type create from the form').toBe(201)
-      const typeId = ((await createResponse.json()) as { id: string }).id
+      const typeId = ((await readJsonSafe(createResponse)) as { id: string }).id
       typeIds.push(typeId)
       await expect(page).toHaveURL(/\/backend\/resources\/resource-types$/)
 

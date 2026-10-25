@@ -224,6 +224,20 @@ describe('resources commands — resource type must be live', () => {
     expect(em.begin).not.toHaveBeenCalled()
   })
 
+  it('update undo refuses to bring a deleted resource back onto its deleted type', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.update')
+    const logEntry = asLogEntry({ undo: { before: buildSnapshot(), after: buildSnapshot({ name: 'Renamed' }) } })
+
+    const failure = await captureFailure(handler!.undo!({ logEntry, ctx } as any))
+
+    expect(failure.status).toBe(409)
+    expect(failure.body).toEqual(DELETED_BODY)
+    expect(record.deletedAt).toBeInstanceOf(Date)
+    expect(em.begin).not.toHaveBeenCalled()
+  })
+
   it('update undo with an unchanged type does not re-check it', async () => {
     const record = buildSnapshot({ name: 'Renamed' })
     const { em, ctx } = buildEnvelope({ record })

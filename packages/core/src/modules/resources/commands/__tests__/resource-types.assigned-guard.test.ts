@@ -111,6 +111,17 @@ describe('resource type "has assigned resources" guard', () => {
     expect(em.flush).toHaveBeenCalledTimes(1)
   })
 
+  it('does not re-check assigned resources when the resource type is already deleted', async () => {
+    const { em, ctx, record } = buildEnvelope(1)
+    record.deletedAt = new Date('2026-01-01T00:00:00.000Z')
+    const handler = commandRegistry.get('resources.resourceTypes.create')
+
+    await handler!.undo!({ logEntry: createLogEntry(), ctx } as any)
+
+    expect(em.count).not.toHaveBeenCalled()
+    expect(em.flush).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps refusing a direct delete of a resource type with assigned resources', async () => {
     const { em, ctx, record } = buildEnvelope(2)
     ;(findOneWithDecryption as jest.Mock).mockResolvedValue(record)

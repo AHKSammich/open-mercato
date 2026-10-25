@@ -166,7 +166,7 @@ const createResourceTypeCommand: CommandHandler<ResourcesResourceTypeCreateInput
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const resourceType = await em.findOne(ResourcesResourceType, { id: after.id })
     if (resourceType) {
-      await assertNoAssignedResources(em, resourceType)
+      if (!resourceType.deletedAt) await assertNoAssignedResources(em, resourceType)
       resourceType.deletedAt = new Date()
       resourceType.updatedAt = new Date()
       await em.flush()
