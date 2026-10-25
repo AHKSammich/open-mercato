@@ -1,6 +1,7 @@
-import { expect, test, type APIRequestContext } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Response } from '@playwright/test'
 import { apiRequest, getAuthToken } from '@open-mercato/core/helpers/integration/api'
 import { login } from '@open-mercato/core/helpers/integration/auth'
+import { fillControlledInput, waitForApiMutation } from '@open-mercato/core/helpers/integration/ui'
 import { readJsonSafe } from '@open-mercato/core/helpers/integration/generalFixtures'
 import {
   expectOperation,
@@ -206,16 +207,15 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await login(page, 'admin')
       await page.goto('/backend/resources/resource-types/create', { waitUntil: 'domcontentloaded' })
       const nameInput = page.locator('form').getByRole('textbox').first()
-      await expect(nameInput).toBeFocused({ timeout: 30_000 })
+      const created: { response: Response | null } = { response: null }
       await expect(async () => {
-        await nameInput.fill(typeName)
-        await expect(nameInput).toHaveValue(typeName, { timeout: 1_000 })
-      }).toPass({ timeout: 20_000 })
-      const createResponsePromise = page.waitForResponse(
-        (response) => response.url().includes(RESOURCE_TYPES) && response.request().method() === 'POST',
-      )
-      await page.getByRole('button', { name: 'Save' }).first().click()
-      const createResponse = await createResponsePromise
+        await fillControlledInput(nameInput, typeName)
+        created.response = await waitForApiMutation(page, RESOURCE_TYPES, async () => {
+          await page.getByRole('button', { name: 'Save' }).first().click()
+        })
+      }).toPass({ timeout: 45_000 })
+      const createResponse = created.response
+      if (!createResponse) throw new Error('[internal] resource type create response missing')
       expect(createResponse.status(), 'resource type create from the form').toBe(201)
       const typeId = ((await createResponse.json()) as { id: string }).id
       typeIds.push(typeId)
