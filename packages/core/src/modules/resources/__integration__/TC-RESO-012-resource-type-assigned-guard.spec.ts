@@ -204,8 +204,9 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       token = await getAuthToken(request, 'admin')
       const typeName = `QA RESO-012 ui type ${Date.now()}`
       await login(page, 'admin')
-      await page.goto('/backend/resources/resource-types/create', { waitUntil: 'networkidle' })
+      await page.goto('/backend/resources/resource-types/create', { waitUntil: 'domcontentloaded' })
       const nameInput = page.locator('form').getByRole('textbox').first()
+      await expect(nameInput).toBeFocused({ timeout: 30_000 })
       await expect(async () => {
         await nameInput.fill(typeName)
         await expect(nameInput).toHaveValue(typeName, { timeout: 1_000 })
