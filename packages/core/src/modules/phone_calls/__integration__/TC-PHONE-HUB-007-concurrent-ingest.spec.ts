@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { randomInt } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext } from '@playwright/test'
 import type { AwilixContainer } from 'awilix'
 import type { EntityManager } from '@mikro-orm/postgresql'
@@ -98,7 +98,9 @@ function fulfilledResults(outcomes: Array<PromiseSettledResult<{ result: IngestR
  * re-ingest must replace the participant set rather than append a second copy of it.
  *
  * Driven through the command bus in this process for the same reason as TC-PHONE-HUB-006: the
- * hub has no route that writes.
+ * hub has no route that writes. The calls land in a run-unique organization id: an ingest writes
+ * search tokens, and tokens present for the admin organization would move TC-PHONE-HUB-006's
+ * `q` search off the plain-column path it relies on.
  */
 test.describe('TC-PHONE-HUB-007: concurrent ingest of the same call is idempotent', () => {
   const participants: Participant[] = [
@@ -108,7 +110,7 @@ test.describe('TC-PHONE-HUB-007: concurrent ingest of the same call is idempoten
 
   async function setup(request: APIRequestContext) {
     const token = await getAuthToken(request)
-    const scope = getTokenScope(token)
+    const scope: TokenScope = { ...getTokenScope(token), organizationId: randomUUID() }
     await bootstrapFromAppRoot(APP_ROOT)
     const container = await createRequestContainer()
     const commandBus = container.resolve('commandBus') as CommandBus
