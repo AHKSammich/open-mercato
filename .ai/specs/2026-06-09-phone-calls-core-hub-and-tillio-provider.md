@@ -669,6 +669,9 @@ Scope of this report: the implemented slice (Phases 1-2). Planned phases are des
 - `phone_calls.call.ingest` runs its lookup and writes under `withAdvisoryXactLock` keyed on the call's
   natural key, so two deliveries of one call that arrive together no longer both insert and fail on
   `phone_calls_provider_external_scope_uq`; the later one updates the row. Covered by TC-PHONE-HUB-007.
+- A delivery that cannot take the lock within the helper's 15 s wait deadline throws
+  `AdvisoryLockUnavailableError` (reason `deadline`); the Tillio pull counts it as a failed call, as it did the
+  unique-index error before.
 
 ### 2026-08-15 - Configurable provider time zone
 

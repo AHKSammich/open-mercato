@@ -118,8 +118,8 @@ function createConcurrentDatabase() {
         pending.push(row)
       },
       async nativeDelete(_entity: unknown, where: Record<string, unknown>) {
-        for (let i = participants.length - 1; i >= 0; i -= 1) {
-          if (participants[i].phoneCallId === where.phoneCallId) participants.splice(i, 1)
+        for (let index = participants.length - 1; index >= 0; index -= 1) {
+          if (participants[index].phoneCallId === where.phoneCallId) participants.splice(index, 1)
         }
       },
       async flush() {
