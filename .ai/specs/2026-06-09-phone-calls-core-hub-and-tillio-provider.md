@@ -516,6 +516,7 @@ after a provider response (normalizer, timestamp parsing, status mapping, URL gu
 | TC-PHONE-HUB-004 | List filters | `q` across all three `$or` columns, `direction`, `status`, `providerKey`, `id`, `sortField` mapping; a bare `yyyy-MM-dd` bound covers its whole day at both ends, a full timestamp keeps its instant, an unparsable date is a 400 |
 | TC-PHONE-HUB-005 | Organization scope | A user homed in one organization cannot read another organization's calls |
 | TC-PHONE-HUB-006 | List cache | An identical query is served from cache, and an ingest through the command bus makes the next identical query a miss carrying the new call |
+| TC-PHONE-HUB-007 | Concurrent ingest | Parallel first deliveries of one call through the command bus resolve as one insert and updates, never a unique-index error; parallel re-deliveries keep one participant set |
 | TC-PHONE-001 | `GET /api/tillio/pull` | Unconfigured environment reports `environment_not_ready` rather than erroring |
 | TC-PHONE-002 | `POST /api/tillio/pull` | Structured 409 before the provider is contacted; reversed day range rejected with 400 |
 | TC-PHONE-003 | Operator routes | Empty listing, attach refused pre-health-check, unsupported plugin rejected, unknown detach is a no-op |
@@ -662,6 +663,12 @@ Scope of this report: the implemented slice (Phases 1-2). Planned phases are des
 ---
 
 ## Changelog
+
+### 2026-10-27 - Concurrent ingest of one call
+
+- `phone_calls.call.ingest` runs its lookup and writes under `withAdvisoryXactLock` keyed on the call's
+  natural key, so two deliveries of one call that arrive together no longer both insert and fail on
+  `phone_calls_provider_external_scope_uq`; the later one updates the row. Covered by TC-PHONE-HUB-007.
 
 ### 2026-08-15 - Configurable provider time zone
 

@@ -61,8 +61,91 @@ function createFakeEm() {
     async begin() {},
     async commit() {},
     async rollback() {},
+    async transactional(run: (txEm: unknown) => Promise<unknown>) {
+      return run(em)
+    },
+    async execute() {
+      return [{ locked: true }]
+    },
   }
   return { em, calls, participants }
+}
+
+function createConcurrentDatabase() {
+  const calls: Row[] = []
+  const participants: Row[] = []
+  const heldLocks = new Set<string>()
+  const lockKeys: string[] = []
+
+  function sameCall(row: Row, where: Record<string, unknown>) {
+    return (
+      row.providerKey === where.providerKey &&
+      row.externalCallId === where.externalCallId &&
+      row.tenantId === where.tenantId &&
+      row.organizationId === where.organizationId
+    )
+  }
+
+  function openSession() {
+    const pending: Row[] = []
+    const acquired: string[] = []
+    const session: Record<string, unknown> = {
+      fork: () => openSession(),
+      async transactional(run: (txEm: unknown) => Promise<unknown>) {
+        try {
+          return await run(session)
+        } finally {
+          for (const key of acquired.splice(0)) heldLocks.delete(key)
+        }
+      },
+      async execute(_sql: string, params: unknown[]) {
+        const key = String(params[0])
+        lockKeys.push(key)
+        if (heldLocks.has(key)) return [{ locked: false }]
+        heldLocks.add(key)
+        acquired.push(key)
+        return [{ locked: true }]
+      },
+      async findOne(entity: unknown, where: Record<string, unknown>) {
+        if (entity !== PhoneCall) return null
+        await Promise.resolve()
+        return calls.find((row) => sameCall(row, where)) ?? null
+      },
+      create(entity: unknown, data: Record<string, unknown>) {
+        return { id: randomUUID(), __entity: entity, ...data } as Row
+      },
+      persist(row: Row) {
+        pending.push(row)
+      },
+      async nativeDelete(_entity: unknown, where: Record<string, unknown>) {
+        for (let i = participants.length - 1; i >= 0; i -= 1) {
+          if (participants[i].phoneCallId === where.phoneCallId) participants.splice(i, 1)
+        }
+      },
+      async flush() {
+        await Promise.resolve()
+        for (const row of pending.splice(0)) {
+          if (row.__entity !== PhoneCall) {
+            participants.push(row)
+            continue
+          }
+          if (calls.some((existing) => existing !== row && sameCall(existing, row))) {
+            throw Object.assign(
+              new Error('duplicate key value violates unique constraint "phone_calls_provider_external_scope_uq"'),
+              { code: '23505' },
+            )
+          }
+          if (!calls.includes(row)) calls.push(row)
+        }
+      },
+      async begin() {},
+      async commit() {},
+      async rollback() {},
+    }
+    return session
+  }
+
+  return { root: openSession(), calls, participants, lockKeys }
 }
 
 function createCtx(em: Record<string, unknown>, dataEngine: Record<string, unknown> = { markOrmEntityChange() {} }) {
@@ -217,6 +300,39 @@ describe('phone_calls.call.ingest', () => {
 
     expect(JSON.stringify(log)).not.toContain('+48111')
     expect(log).not.toHaveProperty('snapshotAfter')
+  })
+})
+
+describe('phone_calls.call.ingest under concurrent deliveries', () => {
+  it('resolves parallel deliveries of one call as one insert and updates, instead of a unique-index error', async () => {
+    const { root, calls, participants, lockKeys } = createConcurrentDatabase()
+
+    const outcomes = await Promise.allSettled([
+      ingestPhoneCallCommand.execute(ingestInput(), createCtx(root)),
+      ingestPhoneCallCommand.execute(ingestInput({ status: 'missed' }), createCtx(root)),
+      ingestPhoneCallCommand.execute(ingestInput(), createCtx(root)),
+    ])
+
+    expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toEqual([])
+    const results = outcomes.map((outcome) => (outcome as PromiseFulfilledResult<{ phoneCallId: string; created: boolean }>).value)
+    expect(results.filter((result) => result.created)).toHaveLength(1)
+    expect(new Set(results.map((result) => result.phoneCallId)).size).toBe(1)
+    expect(calls).toHaveLength(1)
+    expect(participants).toHaveLength(2)
+    expect(new Set(lockKeys)).toEqual(new Set([`phone_calls:ingest:${tenantId}:${organizationId}:${providerKey}:call-abc`]))
+  })
+
+  it('does not make deliveries of different calls wait for each other', async () => {
+    const { root, calls, lockKeys } = createConcurrentDatabase()
+
+    const results = await Promise.all([
+      ingestPhoneCallCommand.execute(ingestInput({ externalCallId: 'call-1' }), createCtx(root)),
+      ingestPhoneCallCommand.execute(ingestInput({ externalCallId: 'call-2' }), createCtx(root)),
+    ])
+
+    expect(results.every((result) => result.created)).toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(lockKeys).toHaveLength(2)
   })
 })
 

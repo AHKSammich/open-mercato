@@ -2,6 +2,7 @@ import { registerCommand } from '@open-mercato/shared/lib/commands'
 import type { CommandHandler } from '@open-mercato/shared/lib/commands'
 import { emitCrudSideEffects } from '@open-mercato/shared/lib/commands/helpers'
 import { withAtomicFlush } from '@open-mercato/shared/lib/commands/flush'
+import { withAdvisoryXactLock } from '@open-mercato/shared/lib/db/advisoryLock'
 import { ensureOrganizationScope, ensureTenantScope } from '@open-mercato/shared/lib/commands/scope'
 import type { CrudIndexerConfig } from '@open-mercato/shared/lib/crud/types'
 import type { DataEngine } from '@open-mercato/shared/lib/data/engine'
@@ -72,6 +73,10 @@ async function syncParticipants(
   }
 }
 
+function ingestLockKey(input: IngestPhoneCallInput): string {
+  return ['phone_calls', 'ingest', input.tenantId, input.organizationId, input.providerKey, input.externalCallId].join(':')
+}
+
 const ingestPhoneCallCommand: CommandHandler<IngestPhoneCallInput, IngestPhoneCallResult> = {
   id: PHONE_CALLS_CALL_INGEST_COMMAND_ID,
   async execute(rawInput, ctx) {
@@ -79,38 +84,43 @@ const ingestPhoneCallCommand: CommandHandler<IngestPhoneCallInput, IngestPhoneCa
     ensureTenantScope(ctx, input.tenantId)
     ensureOrganizationScope(ctx, input.organizationId)
 
-    const em = (ctx.container.resolve('em') as EntityManager).fork()
-    const existing = await findOneWithDecryption(
-      em,
-      PhoneCall,
-      {
-        providerKey: input.providerKey,
-        externalCallId: input.externalCallId,
-        tenantId: input.tenantId,
-        organizationId: input.organizationId,
-      },
-      undefined,
-      { tenantId: input.tenantId, organizationId: input.organizationId },
-    )
-    const created = !existing
-    const call = existing ?? em.create(PhoneCall, {
-      organizationId: input.organizationId,
-      tenantId: input.tenantId,
-      providerKey: input.providerKey,
-      externalCallId: input.externalCallId,
-      direction: input.direction,
-      status: input.status,
-    })
-    if (created) em.persist(call)
-    const ingestedAt = new Date()
+    const { call, created } = await withAdvisoryXactLock(
+      ctx.container.resolve('em') as EntityManager,
+      ingestLockKey(input),
+      async (em) => {
+        const existing = await findOneWithDecryption(
+          em,
+          PhoneCall,
+          {
+            providerKey: input.providerKey,
+            externalCallId: input.externalCallId,
+            tenantId: input.tenantId,
+            organizationId: input.organizationId,
+          },
+          undefined,
+          { tenantId: input.tenantId, organizationId: input.organizationId },
+        )
+        const call = existing ?? em.create(PhoneCall, {
+          organizationId: input.organizationId,
+          tenantId: input.tenantId,
+          providerKey: input.providerKey,
+          externalCallId: input.externalCallId,
+          direction: input.direction,
+          status: input.status,
+        })
+        if (!existing) em.persist(call)
+        const ingestedAt = new Date()
 
-    await withAtomicFlush(
-      em,
-      [
-        () => applyScalarFields(call, input, ingestedAt),
-        () => syncParticipants(em, call, input),
-      ],
-      { transaction: true, label: PHONE_CALLS_CALL_INGEST_COMMAND_ID },
+        await withAtomicFlush(
+          em,
+          [
+            () => applyScalarFields(call, input, ingestedAt),
+            () => syncParticipants(em, call, input),
+          ],
+          { transaction: true, label: PHONE_CALLS_CALL_INGEST_COMMAND_ID },
+        )
+        return { call, created: !existing }
+      },
     )
 
     // The module emits its own declared events, so only the indexer is handed to the
