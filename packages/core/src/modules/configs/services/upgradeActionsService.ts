@@ -91,13 +91,6 @@ export async function executeUpgradeAction(
         organizationId,
       })
       if (alreadyCompleted) return 'already_completed' as const
-      await definition.run({
-        container,
-        em: tem,
-        tenantId,
-        organizationId,
-        deferAfterCommit: (callback) => afterCommitCallbacks.push(callback),
-      })
       const record = tem.create(UpgradeActionRun, {
         actionId: definition.id,
         version: definition.version,
@@ -106,16 +99,25 @@ export async function executeUpgradeAction(
       })
       tem.persist(record)
       await tem.flush()
+      await definition.run({
+        container,
+        em: tem,
+        tenantId,
+        organizationId,
+        deferAfterCommit: (callback) => afterCommitCallbacks.push(callback),
+      })
+      record.completedAt = new Date()
+      await tem.flush()
       logger.info('Upgrade action completed', { component: 'upgrade-actions', actionId: definition.id, version, tenantId, organizationId })
       return 'completed' as const
     })
   } catch (error) {
-    logger.error('Upgrade action failed', { component: 'upgrade-actions', actionId, tenantId, organizationId, version, err: error })
-    if (error instanceof UniqueConstraintViolationException) {
-      status = 'already_completed'
-    } else {
+    if (!(error instanceof UniqueConstraintViolationException)) {
+      logger.error('Upgrade action failed', { component: 'upgrade-actions', actionId, tenantId, organizationId, version, err: error })
       throw error
     }
+    logger.info('Upgrade action already completed by a concurrent request', { component: 'upgrade-actions', actionId, tenantId, organizationId, version, err: error })
+    status = 'already_completed'
   }
 
   if (status === 'completed') {
