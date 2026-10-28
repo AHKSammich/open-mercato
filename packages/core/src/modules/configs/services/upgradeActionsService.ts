@@ -74,6 +74,7 @@ export async function executeUpgradeAction(
   const em = container.resolve<EntityManager>('em')
   const afterCommitCallbacks: Array<() => void | Promise<void>> = []
   let status: UpgradeActionStatus
+  let claimed = false
   try {
     status = await em.transactional(async (tem) => {
       logger.info('Executing upgrade action', {
@@ -99,6 +100,7 @@ export async function executeUpgradeAction(
       })
       tem.persist(record)
       await tem.flush()
+      claimed = true
       await definition.run({
         container,
         em: tem,
@@ -112,12 +114,17 @@ export async function executeUpgradeAction(
       return 'completed' as const
     })
   } catch (error) {
-    if (!(error instanceof UniqueConstraintViolationException)) {
+    const lostClaim = error instanceof UniqueConstraintViolationException && !claimed
+    if (lostClaim) {
+      logger.info('Upgrade action already completed by a concurrent request', { component: 'upgrade-actions', actionId, tenantId, organizationId, version })
+    } else {
       logger.error('Upgrade action failed', { component: 'upgrade-actions', actionId, tenantId, organizationId, version, err: error })
+    }
+    if (error instanceof UniqueConstraintViolationException) {
+      status = 'already_completed'
+    } else {
       throw error
     }
-    logger.info('Upgrade action already completed by a concurrent request', { component: 'upgrade-actions', actionId, tenantId, organizationId, version, err: error })
-    status = 'already_completed'
   }
 
   if (status === 'completed') {

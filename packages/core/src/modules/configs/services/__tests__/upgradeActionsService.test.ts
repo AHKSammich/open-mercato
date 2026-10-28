@@ -2,6 +2,20 @@ jest.mock('@open-mercato/shared/security/enabledModulesRegistry', () => ({
   getEnabledModuleIds: jest.fn(),
 }))
 
+const mockLoggerInfo = jest.fn()
+const mockLoggerError = jest.fn()
+
+jest.mock('@open-mercato/shared/lib/logger', () => {
+  const mockLogger = {
+    debug: jest.fn(),
+    info: (...args: unknown[]) => mockLoggerInfo(...args),
+    warn: jest.fn(),
+    error: (...args: unknown[]) => mockLoggerError(...args),
+    child: () => mockLogger,
+  }
+  return { createLogger: () => mockLogger }
+})
+
 process.env.UPGRADE_ACTIONS_ENABLED = 'true'
 
 import { UniqueConstraintViolationException } from '@mikro-orm/core'
@@ -242,6 +256,11 @@ function createRunStore(options: { holdLookups?: number } = {}) {
 describe('executeUpgradeAction concurrency', () => {
   const RACE_ACTION_ID = 'test.concurrent-non-idempotent-action'
 
+  beforeEach(() => {
+    mockLoggerInfo.mockReset()
+    mockLoggerError.mockReset()
+  })
+
   afterEach(() => {
     const actionIndex = upgradeActions.findIndex((action) => action.id === RACE_ACTION_ID)
     if (actionIndex >= 0) upgradeActions.splice(actionIndex, 1)
@@ -280,6 +299,22 @@ describe('executeUpgradeAction concurrency', () => {
     expect(results.map((result) => result.status).sort()).toEqual(['already_completed', 'completed'])
     expect(run).toHaveBeenCalledTimes(1)
     expect(store.committed).toHaveLength(1)
+    expect(mockLoggerInfo).toHaveBeenCalledWith('Upgrade action already completed by a concurrent request', expect.any(Object))
+    expect(mockLoggerError).not.toHaveBeenCalled()
+  })
+
+  it('logs a unique violation raised by the action body as a failure', async () => {
+    const violation = new UniqueConstraintViolationException(new Error('duplicate key value violates unique constraint "seeded_rows_unique"'))
+    registerAction(jest.fn(async () => {
+      throw violation
+    }))
+    const store = createRunStore()
+
+    await expect(executeUpgradeAction(store.createContainer(), input)).resolves.toMatchObject({ status: 'already_completed' })
+
+    expect(store.committed).toHaveLength(0)
+    expect(mockLoggerError).toHaveBeenCalledWith('Upgrade action failed', expect.objectContaining({ err: violation }))
+    expect(mockLoggerInfo).not.toHaveBeenCalledWith('Upgrade action already completed by a concurrent request', expect.any(Object))
   })
 
   it('leaves no completion record behind when the action body fails, so it can be retried', async () => {
