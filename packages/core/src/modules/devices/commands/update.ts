@@ -1,6 +1,6 @@
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { registerCommand, type CommandHandler } from '@open-mercato/shared/lib/commands'
-import { ensureTenantScope } from '@open-mercato/shared/lib/commands/scope'
+import { ensureOrganizationScope, ensureTenantScope } from '@open-mercato/shared/lib/commands/scope'
 import { extractUndoPayload } from '@open-mercato/shared/lib/commands/undo'
 import { emitCrudSideEffects, emitCrudUndoSideEffects } from '@open-mercato/shared/lib/commands/helpers'
 import { withAtomicFlush } from '@open-mercato/shared/lib/commands/flush'
@@ -32,6 +32,7 @@ const updateDeviceCommand: CommandHandler<UpdateDeviceCommandInput, { id: string
       UserDevice,
       { id: parsed.id, tenantId: parsed.tenantId, deletedAt: null },
     )
+    if (device?.organizationId) ensureOrganizationScope(ctx, device.organizationId)
     return device ? { before: serializeDevice(device) } : {}
   },
   async execute(rawInput, ctx) {
@@ -42,6 +43,7 @@ const updateDeviceCommand: CommandHandler<UpdateDeviceCommandInput, { id: string
       'Device not found',
     )
     ensureTenantScope(ctx, device.tenantId)
+    if (device.organizationId) ensureOrganizationScope(ctx, device.organizationId)
 
     const now = new Date()
     await withAtomicFlush(

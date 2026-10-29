@@ -1,6 +1,6 @@
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { registerCommand, type CommandHandler } from '@open-mercato/shared/lib/commands'
-import { ensureTenantScope } from '@open-mercato/shared/lib/commands/scope'
+import { ensureOrganizationScope, ensureTenantScope } from '@open-mercato/shared/lib/commands/scope'
 import { extractUndoPayload } from '@open-mercato/shared/lib/commands/undo'
 import { emitCrudSideEffects, emitCrudUndoSideEffects } from '@open-mercato/shared/lib/commands/helpers'
 import { withAtomicFlush } from '@open-mercato/shared/lib/commands/flush'
@@ -27,6 +27,7 @@ const registerDeviceCommand: CommandHandler<RegisterDeviceCommandInput, { id: st
     const parsed = registerDeviceCommandSchema.parse(rawInput)
     // Enforce tenant scope before any DB access so prepare() can't probe across tenants.
     ensureTenantScope(ctx, parsed.tenantId)
+    if (parsed.organizationId) ensureOrganizationScope(ctx, parsed.organizationId)
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const existing = await loadExistingDevice(em, {
       tenantId: parsed.tenantId,
@@ -39,6 +40,7 @@ const registerDeviceCommand: CommandHandler<RegisterDeviceCommandInput, { id: st
   async execute(rawInput, ctx) {
     const parsed = registerDeviceCommandSchema.parse(rawInput)
     ensureTenantScope(ctx, parsed.tenantId)
+    if (parsed.organizationId) ensureOrganizationScope(ctx, parsed.organizationId)
 
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const existing = await loadExistingDevice(em, {
