@@ -552,6 +552,7 @@ export async function executeSingleRule(
           em: em as any,
           ruleAuthorId: rule.updatedBy ?? rule.createdBy ?? null,
           rbacService: options.rbacService,
+          dryRun: context.dryRun,
         }
 
         // Execute actions

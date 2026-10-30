@@ -10,6 +10,7 @@ import {
 import type { RbacService } from '../../auth/services/rbacService'
 import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import type { OpenMercatoEndpointOption } from './openmercato-call-options-types'
+import { safeOutboundFetch, UnsafeOutboundUrlError } from '@open-mercato/shared/lib/url-safety'
 
 /**
  * Action definition
@@ -36,6 +37,7 @@ export interface ActionContext extends EvaluationContext {
   openMercatoEndpointOptions?: OpenMercatoEndpointOption[]
   ruleAuthorId?: string | null
   rbacService?: RbacService
+  dryRun?: boolean
   [key: string]: any
 }
 
@@ -99,7 +101,8 @@ export interface CallWebhookResult {
   method: string
   headers: Record<string, any>
   body?: any
-  status: 'pending'
+  status: number | 'pending'
+  statusText?: string
 }
 
 export interface CallOpenMercatoResult {
@@ -396,6 +399,8 @@ async function handleSetField(action: Action, context: ActionContext): Promise<S
   }
 }
 
+const WEBHOOK_TIMEOUT_MS = 10_000
+
 /**
  * CALL_WEBHOOK action handler
  */
@@ -419,14 +424,95 @@ async function handleCallWebhook(
     )
   }
 
+  const requestMethod = method.toUpperCase()
+  const requestHeaders = normalizeWebhookHeaders(headers, context)
+  const requestBody = requestMethod === 'GET'
+    ? undefined
+    : normalizeOpenMercatoRequestBody(body, context)
+
+  if (context.dryRun) {
+    return {
+      type: 'CALL_WEBHOOK',
+      url,
+      method: requestMethod,
+      headers,
+      body,
+      status: 'pending',
+    }
+  }
+
+  const hasContentType = Object.keys(requestHeaders).some((name) => name.toLowerCase() === 'content-type')
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const timeoutError = new Error(`[internal] CALL_WEBHOOK request timed out after ${WEBHOOK_TIMEOUT_MS}ms`)
+      controller.abort(timeoutError)
+      reject(timeoutError)
+    }, WEBHOOK_TIMEOUT_MS)
+  })
+  let response: Response
+  try {
+    response = await Promise.race([
+      safeOutboundFetch(
+        url,
+        {
+          method: requestMethod,
+          headers: hasContentType
+            ? requestHeaders
+            : { 'Content-Type': 'application/json', ...requestHeaders },
+          body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
+          signal: controller.signal,
+        },
+        { subject: 'CALL_WEBHOOK URL' },
+      ),
+      deadline,
+    ])
+  } catch (error) {
+    if (error instanceof UnsafeOutboundUrlError) {
+      throw new Error(`[internal] CALL_WEBHOOK rejected unsafe URL (reason=${error.reason}): ${error.message}`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+
+  void response.body?.cancel().catch(() => undefined)
+  if (!response.ok) {
+    throw new Error(`[internal] CALL_WEBHOOK request failed with status ${response.status}`)
+  }
+
   return {
     type: 'CALL_WEBHOOK',
     url,
-    method: method.toUpperCase(),
+    method: requestMethod,
     headers,
     body,
-    status: 'pending',
+    status: response.status,
+    statusText: response.statusText,
   }
+}
+
+function normalizeWebhookHeaders(value: unknown, context: ActionContext): Record<string, string> {
+  let parsed: unknown = value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return {}
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      parsed = null
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('[internal] CALL_WEBHOOK action headers must be a JSON object')
+  }
+  return Object.fromEntries(
+    Object.entries(parsed).map(([name, entry]) => [
+      name,
+      interpolateMessage(String(entry ?? ''), context),
+    ]),
+  )
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

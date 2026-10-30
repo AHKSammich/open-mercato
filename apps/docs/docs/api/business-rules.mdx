@@ -319,16 +319,18 @@ Business rules can emit events that trigger webhooks. Configure webhook URLs in 
   "config": {
     "url": "https://your-app.com/webhooks/rule-executed",
     "method": "POST",
-    "payload": "{\"ruleId\": \"{{ruleId}}\", \"result\": \"{{result}}\"}"
+    "body": "{\"ruleId\": \"{{ruleId}}\", \"result\": \"{{result}}\"}"
   }
 }
 ```
 
 Webhook requests include:
 
-- JSON payload from action config
-- Header: `X-Open-Mercato-Event: rule.executed`
-- Header: `X-Open-Mercato-Signature: hmac-sha256-signature`
+- JSON body from the action's `body` config (not sent for `GET`)
+- `Content-Type: application/json` unless `headers` sets another content type
+- Any `headers` from the action config
+
+Webhook URLs must be public `http`/`https` addresses: private, loopback and link-local hosts are rejected. Redirects are not followed, and a non-2xx response, a network error or no answer within 10 seconds marks the action as failed. Dry runs (`dryRun: true`) do not send the request.
 
 ## Best Practices
 

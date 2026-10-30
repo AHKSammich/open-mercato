@@ -403,7 +403,8 @@ Supports interpolation:
   config: {
     url: 'https://api.example.com/webhooks/order-created',
     method: 'POST',
-    payload: '{"orderId": "{{entityId}}", "total": {{total}}}'
+    headers: '{"X-Source": "open-mercato"}',
+    body: '{"orderId": "{{entityId}}", "total": {{total}}}'
   }
 }
 ```

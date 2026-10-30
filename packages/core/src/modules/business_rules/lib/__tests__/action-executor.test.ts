@@ -17,6 +17,7 @@ import {
   type CallOpenMercatoResult,
   type EmitEventResult,
 } from '../action-executor'
+import type { HostLookup, SafeOutboundFetchOptions } from '@open-mercato/shared/lib/url-safety'
 import { createTransactionalEntityManagerDouble } from '../../../../test-utils/transactionalEntityManagerDouble'
 
 const mockAssertActorCanGrantRoles = jest.fn(async (_input: unknown) => undefined)
@@ -26,6 +27,24 @@ jest.mock('../../../auth/lib/grantChecks', () => ({
   assertActorCanGrantRoles: jest.fn((input: unknown) => mockAssertActorCanGrantRoles(input)),
   isUserEffectivelySuperAdmin: jest.fn((em: unknown, userId: string) => mockIsUserEffectivelySuperAdmin(em, userId)),
 }))
+
+const mockWebhookFetch = jest.fn<typeof fetch>()
+const mockWebhookLookup = jest.fn<HostLookup>()
+
+jest.mock('@open-mercato/shared/lib/url-safety', () => {
+  const actual = jest.requireActual<typeof import('@open-mercato/shared/lib/url-safety')>(
+    '@open-mercato/shared/lib/url-safety',
+  )
+  return {
+    ...actual,
+    safeOutboundFetch: (url: string, init?: RequestInit, options?: SafeOutboundFetchOptions) =>
+      actual.safeOutboundFetch(url, init, {
+        ...options,
+        lookupHost: (host: string) => mockWebhookLookup(host),
+        fetchImpl: (input, requestInit) => mockWebhookFetch(input, requestInit),
+      }),
+  }
+})
 
 describe('Action Executor', () => {
   // Type-safe result extractors
@@ -389,14 +408,26 @@ describe('Action Executor', () => {
     })
 
     describe('CALL_WEBHOOK', () => {
-      it('should execute CALL_WEBHOOK action', async () => {
+      const okResponse = (status = 200) =>
+        new Response(null, { status, statusText: status === 200 ? 'OK' : 'Accepted' })
+
+      beforeEach(() => {
+        mockWebhookFetch.mockReset()
+        mockWebhookLookup.mockReset()
+        mockWebhookLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])
+        mockWebhookFetch.mockResolvedValue(okResponse())
+      })
+
+      const lastWebhookInit = () => mockWebhookFetch.mock.calls[0][1] as RequestInit
+
+      it('sends the configured request and reports the response status', async () => {
         const action: Action = {
           type: 'CALL_WEBHOOK',
           config: {
             url: 'https://api.example.com/webhook',
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json',
+              'X-Signature': 'abc',
             },
             body: {
               event: 'work_order_updated',
@@ -407,17 +438,29 @@ describe('Action Executor', () => {
         const result = await executeAction(action, baseContext)
 
         expect(result.success).toBe(true)
+        expect(mockWebhookFetch).toHaveBeenCalledTimes(1)
+        expect(mockWebhookFetch.mock.calls[0][0]).toBe('https://api.example.com/webhook')
+        const init = lastWebhookInit()
+        expect(init.method).toBe('POST')
+        expect(init.redirect).toBe('manual')
+        expect(init.signal).toBeInstanceOf(AbortSignal)
+        expect(init.headers).toEqual({
+          'Content-Type': 'application/json',
+          'X-Signature': 'abc',
+        })
+        expect(init.body).toBe(JSON.stringify({ event: 'work_order_updated' }))
         expect(result.result).toEqual({
           type: 'CALL_WEBHOOK',
           url: 'https://api.example.com/webhook',
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
+            'X-Signature': 'abc',
           },
           body: {
             event: 'work_order_updated',
           },
-          status: 'pending',
+          status: 200,
+          statusText: 'OK',
         })
       })
 
@@ -431,20 +474,205 @@ describe('Action Executor', () => {
 
         const result = await executeAction(action, baseContext)
 
-        expect((result.result as CallWebhookResult)!.method).toBe('POST')
+        expect(asCallWebhook(result).method).toBe('POST')
+        expect(lastWebhookInit().method).toBe('POST')
+        expect(lastWebhookInit().body).toBeUndefined()
       })
 
-      it('should interpolate URL', async () => {
+      it('interpolates the URL, headers and body from the rule context', async () => {
         const action: Action = {
           type: 'CALL_WEBHOOK',
           config: {
             url: 'https://api.example.com/webhook/{{entityId}}',
+            headers: '{"X-Entity": "{{entityType}}"}',
+            body: '{"number": "{{data.workOrderNumber}}"}',
           },
         }
 
         const result = await executeAction(action, baseContext)
 
-        expect((result.result as CallWebhookResult)!.url).toBe('https://api.example.com/webhook/wo-001')
+        expect(result.success).toBe(true)
+        expect(asCallWebhook(result).url).toBe('https://api.example.com/webhook/wo-001')
+        expect(mockWebhookFetch.mock.calls[0][0]).toBe('https://api.example.com/webhook/wo-001')
+        expect(lastWebhookInit().headers).toEqual({
+          'Content-Type': 'application/json',
+          'X-Entity': 'WorkOrder',
+        })
+        expect(lastWebhookInit().body).toBe(JSON.stringify({ number: 'WO-12345' }))
+      })
+
+      it('does not send a body with GET requests', async () => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: {
+            url: 'https://api.example.com/webhook',
+            method: 'get',
+            body: { ignored: true },
+          },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(true)
+        expect(asCallWebhook(result).method).toBe('GET')
+        expect(lastWebhookInit().method).toBe('GET')
+        expect(lastWebhookInit().body).toBeUndefined()
+      })
+
+      it('fails when the receiver answers with a non-2xx status', async () => {
+        mockWebhookFetch.mockResolvedValue(new Response('upstream secret', { status: 503 }))
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: { url: 'https://api.example.com/webhook' },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toBe('[internal] CALL_WEBHOOK request failed with status 503')
+      })
+
+      it('fails on a redirect instead of following it', async () => {
+        mockWebhookFetch.mockResolvedValue(
+          new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/' } }),
+        )
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: { url: 'https://api.example.com/webhook' },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toBe('[internal] CALL_WEBHOOK request failed with status 302')
+        expect(mockWebhookFetch).toHaveBeenCalledTimes(1)
+      })
+
+      it('fails when the request cannot be delivered', async () => {
+        mockWebhookFetch.mockRejectedValue(new Error('connect ECONNREFUSED'))
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: { url: 'https://api.example.com/webhook' },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('ECONNREFUSED')
+      })
+
+      it.each([
+        ['loopback IP literal', 'http://127.0.0.1:9/hook', 'private_ip_literal'],
+        ['cloud metadata IP literal', 'http://169.254.169.254/latest', 'private_ip_literal'],
+        ['localhost hostname', 'http://localhost/hook', 'blocked_hostname'],
+        ['non-http protocol', 'file:///etc/passwd', 'forbidden_protocol'],
+        ['embedded credentials', 'https://user:pass@api.example.com/hook', 'credentials_in_url'],
+      ])('rejects an unsafe URL (%s) without sending it', async (_label, url, reason) => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: { url },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain(`[internal] CALL_WEBHOOK rejected unsafe URL (reason=${reason})`)
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
+      })
+
+      it('rejects a hostname that resolves to a private address', async () => {
+        mockWebhookLookup.mockResolvedValue([{ address: '10.0.0.5', family: 4 }])
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: { url: 'https://internal.example.com/hook' },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('reason=private_ip_resolved')
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
+      })
+
+      it('keeps a configured content type instead of adding the JSON default', async () => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: {
+            url: 'https://api.example.com/webhook',
+            headers: { 'content-type': 'text/plain' },
+          },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(true)
+        expect(lastWebhookInit().headers).toEqual({ 'content-type': 'text/plain' })
+      })
+
+      it('does not send the request during a dry run', async () => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: {
+            url: 'https://api.example.com/webhook/{{entityId}}',
+            method: 'put',
+            body: { event: 'work_order_updated' },
+          },
+        }
+
+        const result = await executeAction(action, { ...baseContext, dryRun: true })
+
+        expect(result.success).toBe(true)
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
+        expect(result.result).toEqual({
+          type: 'CALL_WEBHOOK',
+          url: 'https://api.example.com/webhook/wo-001',
+          method: 'PUT',
+          headers: {},
+          body: { event: 'work_order_updated' },
+          status: 'pending',
+        })
+      })
+
+      it('fails and aborts the request when the receiver does not answer in time', async () => {
+        jest.useFakeTimers()
+        try {
+          let abortReason: unknown
+          mockWebhookFetch.mockImplementation((_input, init) => new Promise<Response>(() => {
+            init?.signal?.addEventListener('abort', () => {
+              abortReason = init.signal?.reason
+            })
+          }))
+          const action: Action = {
+            type: 'CALL_WEBHOOK',
+            config: { url: 'https://api.example.com/webhook' },
+          }
+
+          const pending = executeAction(action, baseContext)
+          await jest.advanceTimersByTimeAsync(10_000)
+          const result = await pending
+
+          expect(result.success).toBe(false)
+          expect(result.error).toBe('[internal] CALL_WEBHOOK request timed out after 10000ms')
+          expect(abortReason).toBeInstanceOf(Error)
+        } finally {
+          jest.useRealTimers()
+        }
+      })
+
+      it('rejects headers that are not an object', async () => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: {
+            url: 'https://api.example.com/webhook',
+            headers: 'X-Signature: abc',
+          },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('headers must be a JSON object')
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
       })
 
       it('should throw error if URL is empty', async () => {
@@ -459,6 +687,7 @@ describe('Action Executor', () => {
 
         expect(result.success).toBe(false)
         expect(result.error).toContain('non-empty URL')
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
       })
 
       it('should throw error if HTTP method is invalid', async () => {
@@ -474,21 +703,7 @@ describe('Action Executor', () => {
 
         expect(result.success).toBe(false)
         expect(result.error).toContain('valid HTTP method')
-      })
-
-      it('should normalize HTTP method to uppercase', async () => {
-        const action: Action = {
-          type: 'CALL_WEBHOOK',
-          config: {
-            url: 'https://api.example.com/webhook',
-            method: 'get',
-          },
-        }
-
-        const result = await executeAction(action, baseContext)
-
-        expect(result.success).toBe(true)
-        expect((result.result as CallWebhookResult)!.method).toBe('GET')
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
       })
     })
 
