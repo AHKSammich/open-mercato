@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import type { AwilixContainer } from 'awilix'
+import { isUniqueViolation } from '@open-mercato/shared/lib/crud/errors'
 import {
   WorkflowDefinition,
   type WorkflowDefinitionData,
@@ -23,6 +24,13 @@ import { invalidateTriggerCache } from './event-trigger-service'
  * Ownership is recorded in `metadata.generatedBy` and re-checked on every write,
  * so this can never silently take over a workflow a person authored or one
  * belonging to a different owner.
+ *
+ * Concurrent first-time callers race on the `(workflowId, version, tenantId)`
+ * unique index. A caller that loses the insert re-reads the winning row and
+ * settles exactly as a sequential second save would: an update of a row it owns
+ * (`created: false`) or `owned_by_other`. Its own principal is re-scoped to no
+ * features. Inside an outer transaction the violation still propagates, because
+ * Postgres has already aborted that transaction.
  *
  * Execution identity comes with it: `grantedFeatures` is applied through the same
  * `syncWorkflowDefinitionPrincipal` the definitions API uses, so a generated
@@ -75,8 +83,10 @@ function ownedBy(definition: WorkflowDefinition, ownerModule: string, ownerId: s
   return !!generatedBy && generatedBy.module === ownerModule && generatedBy.ownerId === ownerId
 }
 
+const DEFINITION_VERSION_UNIQUE_CONSTRAINT = 'workflow_definitions_workflow_id_version_tenant_id_unique'
+
 export function createWorkflowDefinitionAuthoring(container: AwilixContainer): WorkflowDefinitionAuthoring {
-  return {
+  const authoring: WorkflowDefinitionAuthoring = {
     async findOwnedDefinition(em, params) {
       return em.findOne(
         WorkflowDefinition,
@@ -160,7 +170,29 @@ export function createWorkflowDefinitionAuthoring(container: AwilixContainer): W
 
       await syncWorkflowDefinitionPrincipal(container, definition)
       em.persist(definition)
-      await em.flush()
+      try {
+        await em.flush()
+      } catch (error) {
+        if (existing || !isUniqueViolation(error, DEFINITION_VERSION_UNIQUE_CONSTRAINT)) throw error
+        em.getUnitOfWork().unsetIdentity(definition)
+        if (em.isInTransaction()) throw error
+        const winner = await authoring.findOwnedDefinition(em, input)
+        if (!winner) throw error
+        if (grantedFeatures.length) {
+          await syncWorkflowDefinitionPrincipal(
+            container,
+            {
+              id: definition.id,
+              workflowId: definition.workflowId,
+              tenantId: definition.tenantId,
+              organizationId: definition.organizationId,
+              grantedFeatures: null,
+            },
+            { previousFeatures: grantedFeatures },
+          )
+        }
+        return authoring.upsertOwnedDefinition(em, input)
+      }
 
       // Embedded triggers on a freshly written definition must be visible to the
       // wildcard event subscriber immediately.
@@ -185,4 +217,5 @@ export function createWorkflowDefinitionAuthoring(container: AwilixContainer): W
       return true
     },
   }
+  return authoring
 }
