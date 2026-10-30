@@ -162,13 +162,17 @@ describe('upsertOwnedDefinition — losing a concurrent first create', () => {
     expect(em.findOne).toHaveBeenCalledTimes(1)
   })
 
-  it('still throws inside an outer transaction, after detaching the failed row', async () => {
+  it('still throws inside an outer transaction, after detaching the failed row and re-scoping its principal', async () => {
     const failure = uniqueViolation()
     const em = makeEm({ reads: [null], flushes: [failure], inTransaction: true })
 
-    await expect(upsert(em, makeInput())).rejects.toBe(failure)
+    await expect(upsert(em, makeInput({ grantedFeatures: ['workflows.instances.view'] }))).rejects.toBe(failure)
     expect(em.unsetIdentity).toHaveBeenCalledWith(em.created[0])
     expect(em.findOne).toHaveBeenCalledTimes(1)
+    expect(syncPrincipal).toHaveBeenCalledTimes(2)
+    expect(syncPrincipal.mock.calls[1][1]).toEqual(
+      expect.objectContaining({ id: em.created[0].id, grantedFeatures: null }),
+    )
   })
 
   it('still throws when no live row is found after the violation', async () => {

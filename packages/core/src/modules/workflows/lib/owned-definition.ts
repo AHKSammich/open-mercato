@@ -28,9 +28,9 @@ import { invalidateTriggerCache } from './event-trigger-service'
  * Concurrent first-time callers race on the `(workflowId, version, tenantId)`
  * unique index. A caller that loses the insert re-reads the winning row and
  * settles exactly as a sequential second save would: an update of a row it owns
- * (`created: false`) or `owned_by_other`. Its own principal is re-scoped to no
- * features. Inside an outer transaction the violation still propagates, because
- * Postgres has already aborted that transaction.
+ * (`created: false`) or `owned_by_other`. When it declared a grant, its own
+ * principal is re-scoped to no features first. Inside an outer transaction the
+ * violation still propagates, because Postgres has already aborted it.
  *
  * Execution identity comes with it: `grantedFeatures` is applied through the same
  * `syncWorkflowDefinitionPrincipal` the definitions API uses, so a generated
@@ -175,9 +175,6 @@ export function createWorkflowDefinitionAuthoring(container: AwilixContainer): W
       } catch (error) {
         if (existing || !isUniqueViolation(error, DEFINITION_VERSION_UNIQUE_CONSTRAINT)) throw error
         em.getUnitOfWork().unsetIdentity(definition)
-        if (em.isInTransaction()) throw error
-        const winner = await authoring.findOwnedDefinition(em, input)
-        if (!winner) throw error
         if (grantedFeatures.length) {
           await syncWorkflowDefinitionPrincipal(
             container,
@@ -191,6 +188,9 @@ export function createWorkflowDefinitionAuthoring(container: AwilixContainer): W
             { previousFeatures: grantedFeatures },
           )
         }
+        if (em.isInTransaction()) throw error
+        const winner = await authoring.findOwnedDefinition(em, input)
+        if (!winner) throw error
         return authoring.upsertOwnedDefinition(em, input)
       }
 
