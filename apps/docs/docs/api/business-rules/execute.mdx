@@ -209,11 +209,11 @@ curl -X POST "$BASE_URL/api/business_rules/execute" \
 - ✅ Conditions are evaluated normally
 - ✅ Execution is logged
 - ✅ Response indicates what would happen
-- ⚠️ Some actions may still execute (CALL_OPEN_MERCATO calls)
+- ⚠️ Some actions may still execute (webhooks, external calls)
 - ❌ Database updates (SET_FIELD) are not committed
 - ❌ Internal events (EMIT_EVENT) are not emitted
 
-> ⚠️ **Important**: CALL_OPEN_MERCATO actions still execute in dry run mode; CALL_WEBHOOK requests are not sent. Be cautious when testing rules with external integrations.
+> ⚠️ **Important**: CALL_WEBHOOK and CALL_OPEN_MERCATO actions still send their requests in dry run mode. Be cautious when testing rules with external integrations.
 
 ## Rule Discovery
 

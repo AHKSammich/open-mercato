@@ -386,35 +386,6 @@ describe('Rule Engine (Unit Tests)', () => {
       }
     })
 
-    test('passes the dry-run flag to the actions', async () => {
-      mockEm.create.mockReturnValue({ id: 'log-1' } as any)
-      jest.mocked(ruleEvaluator.evaluateSingleRule).mockResolvedValue({
-        rule: mockRule as BusinessRule,
-        conditionsPassed: true,
-        evaluationCompleted: true,
-        evaluationTime: 1,
-      })
-      jest.mocked(actionExecutor.executeActions).mockResolvedValue(allowOutcome)
-
-      for (const dryRun of [true, false]) {
-        jest.mocked(actionExecutor.executeActions).mockClear()
-
-        await ruleEngine.executeSingleRule(mockEm, mockRule as BusinessRule, {
-          entityType: 'WorkOrder',
-          entityId: testEntityId,
-          data: { status: 'RELEASED' },
-          tenantId: testTenantId,
-          organizationId: testOrgId,
-          dryRun,
-        })
-
-        expect(actionExecutor.executeActions).toHaveBeenCalledWith(
-          mockRule.successActions,
-          expect.objectContaining({ dryRun }),
-        )
-      }
-    })
-
     test('forwards the caller rbacService to the actions from executeRules and executeRuleById', async () => {
       const rbacService = { loadAcl: jest.fn() } as any
       const rule = { ...mockRule, id: testEntityId } as BusinessRule

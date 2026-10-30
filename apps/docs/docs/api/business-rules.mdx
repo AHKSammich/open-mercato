@@ -330,7 +330,7 @@ Webhook requests include:
 - `Content-Type: application/json` unless `headers` sets another content type
 - Any `headers` from the action config
 
-Webhook URLs must be public `http`/`https` addresses: private, loopback and link-local hosts are rejected. Redirects are not followed, and a non-2xx response, a network error or no answer within 10 seconds marks the action as failed. Dry runs (`dryRun: true`) do not send the request.
+Webhook URLs must be public `http`/`https` addresses: private, loopback and link-local hosts are rejected. Redirects are not followed, and a non-2xx response, a network error or no answer within 10 seconds marks the action as failed. Dry runs (`dryRun: true`) still send the request.
 
 ## Best Practices
 

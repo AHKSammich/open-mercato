@@ -424,7 +424,7 @@ Supports interpolation:
 
 **Dry Run Mode**: When `dryRun: true`, actions return planned execution without side effects:
 - NOTIFY: doesn't send notifications
-- CALL_WEBHOOK: doesn't make HTTP calls
+- CALL_WEBHOOK: still sends the request (pass `skipActions: true` to skip all actions)
 - EMIT_EVENT: doesn't emit events
 - SET_FIELD: doesn't modify data
 - Feedback actions (SHOW_ERROR, etc.): still execute

@@ -477,6 +477,7 @@ describe('Action Executor', () => {
         expect(asCallWebhook(result).method).toBe('POST')
         expect(lastWebhookInit().method).toBe('POST')
         expect(lastWebhookInit().body).toBeUndefined()
+        expect(lastWebhookInit().headers).toEqual({})
       })
 
       it('interpolates the URL, headers and body from the rule context', async () => {
@@ -517,6 +518,7 @@ describe('Action Executor', () => {
         expect(asCallWebhook(result).method).toBe('GET')
         expect(lastWebhookInit().method).toBe('GET')
         expect(lastWebhookInit().body).toBeUndefined()
+        expect(lastWebhookInit().headers).toEqual({})
       })
 
       it('fails when the receiver answers with a non-2xx status', async () => {
@@ -548,8 +550,9 @@ describe('Action Executor', () => {
         expect(mockWebhookFetch).toHaveBeenCalledTimes(1)
       })
 
-      it('fails when the request cannot be delivered', async () => {
-        mockWebhookFetch.mockRejectedValue(new Error('connect ECONNREFUSED'))
+      it('fails with the network error code when the request cannot be delivered', async () => {
+        const cause = Object.assign(new Error('connect ECONNREFUSED 93.184.216.34:443'), { code: 'ECONNREFUSED' })
+        mockWebhookFetch.mockRejectedValue(new TypeError('fetch failed', { cause }))
         const action: Action = {
           type: 'CALL_WEBHOOK',
           config: { url: 'https://api.example.com/webhook' },
@@ -558,7 +561,7 @@ describe('Action Executor', () => {
         const result = await executeAction(action, baseContext)
 
         expect(result.success).toBe(false)
-        expect(result.error).toContain('ECONNREFUSED')
+        expect(result.error).toBe('[internal] CALL_WEBHOOK request failed: fetch failed (ECONNREFUSED)')
       })
 
       it.each([
@@ -590,7 +593,8 @@ describe('Action Executor', () => {
         const result = await executeAction(action, baseContext)
 
         expect(result.success).toBe(false)
-        expect(result.error).toContain('reason=private_ip_resolved')
+        expect(result.error).toBe('[internal] CALL_WEBHOOK rejected unsafe URL (reason=private_ip_resolved)')
+        expect(result.error).not.toContain('10.0.0.5')
         expect(mockWebhookFetch).not.toHaveBeenCalled()
       })
 
@@ -600,6 +604,7 @@ describe('Action Executor', () => {
           config: {
             url: 'https://api.example.com/webhook',
             headers: { 'content-type': 'text/plain' },
+            body: 'plain',
           },
         }
 
@@ -607,30 +612,6 @@ describe('Action Executor', () => {
 
         expect(result.success).toBe(true)
         expect(lastWebhookInit().headers).toEqual({ 'content-type': 'text/plain' })
-      })
-
-      it('does not send the request during a dry run', async () => {
-        const action: Action = {
-          type: 'CALL_WEBHOOK',
-          config: {
-            url: 'https://api.example.com/webhook/{{entityId}}',
-            method: 'put',
-            body: { event: 'work_order_updated' },
-          },
-        }
-
-        const result = await executeAction(action, { ...baseContext, dryRun: true })
-
-        expect(result.success).toBe(true)
-        expect(mockWebhookFetch).not.toHaveBeenCalled()
-        expect(result.result).toEqual({
-          type: 'CALL_WEBHOOK',
-          url: 'https://api.example.com/webhook/wo-001',
-          method: 'PUT',
-          headers: {},
-          body: { event: 'work_order_updated' },
-          status: 'pending',
-        })
       })
 
       it('fails and aborts the request when the receiver does not answer in time', async () => {
@@ -672,6 +653,22 @@ describe('Action Executor', () => {
 
         expect(result.success).toBe(false)
         expect(result.error).toContain('headers must be a JSON object')
+        expect(mockWebhookFetch).not.toHaveBeenCalled()
+      })
+
+      it('rejects nested header values', async () => {
+        const action: Action = {
+          type: 'CALL_WEBHOOK',
+          config: {
+            url: 'https://api.example.com/webhook',
+            headers: { 'X-Meta': { nested: true } },
+          },
+        }
+
+        const result = await executeAction(action, baseContext)
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('header values must be strings, numbers or booleans')
         expect(mockWebhookFetch).not.toHaveBeenCalled()
       })
 
