@@ -41,7 +41,7 @@ const UNAVAILABLE_BODY = {
   code: 'resources.resources.errors.resourceTypeUnavailable',
 }
 const DELETED_BODY = {
-  error: 'The resource type of this resource was deleted. Undo the resource type deletion first.',
+  error: 'The resource type of this resource was deleted. Restore the resource type first.',
   code: 'resources.resources.errors.resourceTypeDeleted',
 }
 
@@ -249,6 +249,25 @@ describe('resources commands — resource type must be live', () => {
     expect(em.begin).not.toHaveBeenCalled()
   })
 
+  it('update undo moves a resource back to its previous type while that type is live', async () => {
+    const record = buildSnapshot({ resourceTypeId: OTHER_TYPE_ID })
+    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [TEST_TYPE_ID, OTHER_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.update')
+    const logEntry = asLogEntry({
+      undo: { before: buildSnapshot(), after: buildSnapshot({ resourceTypeId: OTHER_TYPE_ID }) },
+    })
+
+    await handler!.undo!({ input: undefined, logEntry, ctx })
+
+    expect(em.count).toHaveBeenCalledWith(ResourcesResourceType, {
+      id: TEST_TYPE_ID,
+      tenantId: TEST_TENANT_ID,
+      organizationId: TEST_ORG_ID,
+      deletedAt: { $ne: null },
+    })
+    expect(record.resourceTypeId).toBe(TEST_TYPE_ID)
+  })
+
   it('update undo refuses to bring a deleted resource back onto its deleted type', async () => {
     const record = buildSnapshot({ deletedAt: new Date() })
     const { em, ctx } = buildEnvelope({ record, deletedTypeIds: [TEST_TYPE_ID] })
@@ -288,5 +307,21 @@ describe('resources commands — resource type must be live', () => {
     expect(failure.body).toEqual(DELETED_BODY)
     expect(record.deletedAt).toBeInstanceOf(Date)
     expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('create redo re-creates the resource while its type is live', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [TEST_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.create')
+
+    await handler!.redo!({ input: undefined, logEntry: asLogEntry({ undo: { after: buildSnapshot() } }), ctx })
+
+    expect(em.count).toHaveBeenCalledWith(ResourcesResourceType, {
+      id: TEST_TYPE_ID,
+      tenantId: TEST_TENANT_ID,
+      organizationId: TEST_ORG_ID,
+      deletedAt: { $ne: null },
+    })
+    expect(record.deletedAt).toBeNull()
   })
 })

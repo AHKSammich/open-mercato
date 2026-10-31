@@ -443,7 +443,7 @@
   "resources.resources.detail.tabs.activities": "Aktivitäten",
   "resources.resources.detail.tabs.notes": "Notizen",
   "resources.resources.detail.untitled": "Unbenannte Ressource",
-  "resources.resources.errors.resourceTypeDeleted": "Der Ressourcentyp dieser Ressource wurde gelöscht. Machen Sie zuerst das Löschen des Ressourcentyps rückgängig.",
+  "resources.resources.errors.resourceTypeDeleted": "Der Ressourcentyp dieser Ressource wurde gelöscht. Stellen Sie zuerst den Ressourcentyp wieder her.",
   "resources.resources.errors.resourceTypeUnavailable": "Der ausgewählte Ressourcentyp ist nicht mehr verfügbar.",
   "resources.resources.flash.createdAvailability": "Gespeichert. Du kannst jetzt die Verfügbarkeit festlegen.",
   "resources.resources.form.actions.create": "Erstellen",
