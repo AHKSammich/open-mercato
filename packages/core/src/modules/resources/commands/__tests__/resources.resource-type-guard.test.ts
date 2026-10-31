@@ -41,7 +41,7 @@ const UNAVAILABLE_BODY = {
   code: 'resources.resources.errors.resourceTypeUnavailable',
 }
 const DELETED_BODY = {
-  error: 'The resource type of this resource was deleted. Restore the resource type first.',
+  error: 'This would put the resource on a deleted resource type. Restore the resource type first.',
   code: 'resources.resources.errors.resourceTypeDeleted',
 }
 
@@ -177,6 +177,24 @@ describe('resources commands — resource type must be live', () => {
     expect(failure.body).toEqual(UNAVAILABLE_BODY)
     expect(record.resourceTypeId).toBeNull()
     expect(em.begin).not.toHaveBeenCalled()
+  })
+
+  it('update accepts switching to a live resource type of the same organization', async () => {
+    const record = buildSnapshot()
+    ;(findOneWithDecryption as jest.Mock).mockResolvedValue(record)
+    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [OTHER_TYPE_ID] })
+    const handler = commandRegistry.get('resources.resources.update')
+
+    await expect(
+      handler!.execute({ id: TEST_RESOURCE_ID, resourceTypeId: OTHER_TYPE_ID }, ctx),
+    ).resolves.toEqual({ resourceId: TEST_RESOURCE_ID })
+    expect(em.count).toHaveBeenCalledWith(ResourcesResourceType, {
+      id: OTHER_TYPE_ID,
+      tenantId: TEST_TENANT_ID,
+      organizationId: TEST_ORG_ID,
+      deletedAt: null,
+    })
+    expect(record.resourceTypeId).toBe(OTHER_TYPE_ID)
   })
 
   it('update keeps resources whose stored type is already deleted editable', async () => {

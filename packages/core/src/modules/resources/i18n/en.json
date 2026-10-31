@@ -443,7 +443,7 @@
   "resources.resources.detail.tabs.activities": "Activities",
   "resources.resources.detail.tabs.notes": "Notes",
   "resources.resources.detail.untitled": "Unnamed resource",
-  "resources.resources.errors.resourceTypeDeleted": "The resource type of this resource was deleted. Restore the resource type first.",
+  "resources.resources.errors.resourceTypeDeleted": "This would put the resource on a deleted resource type. Restore the resource type first.",
   "resources.resources.errors.resourceTypeUnavailable": "The selected resource type is no longer available.",
   "resources.resources.flash.createdAvailability": "Saved. You can now set availability.",
   "resources.resources.form.actions.create": "Create",

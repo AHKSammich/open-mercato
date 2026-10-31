@@ -250,7 +250,7 @@ async function assertResourceTypeRestorable(
   throw new CrudHttpError(409, {
     error: translate(
       'resources.resources.errors.resourceTypeDeleted',
-      'The resource type of this resource was deleted. Restore the resource type first.',
+      'This would put the resource on a deleted resource type. Restore the resource type first.',
     ),
     code: 'resources.resources.errors.resourceTypeDeleted',
   })

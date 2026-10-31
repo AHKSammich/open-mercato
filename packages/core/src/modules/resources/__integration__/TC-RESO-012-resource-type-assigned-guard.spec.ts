@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext, type Response } from '@playwright/test'
 import { apiRequest, getAuthToken } from '@open-mercato/core/helpers/integration/api'
 import { login } from '@open-mercato/core/helpers/integration/auth'
@@ -104,7 +105,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
     }
   })
 
-  test('resource create and update refuse a deleted resource type', async ({ request }) => {
+  test('resource create and update refuse a deleted or unknown resource type', async ({ request }) => {
     let token: string | null = null
     const resourceIds: string[] = []
     const typeIds: string[] = []
@@ -112,7 +113,9 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       token = await getAuthToken(request, 'admin')
       const stamp = `${Date.now()}-write`
       const deletedType = await createResourceType(request, token, `QA RESO-012 deleted ${stamp}`)
+      typeIds.push(deletedType.id)
       await deleteById(request, token, RESOURCE_TYPES, deletedType.id)
+      typeIds.pop()
 
       const createRes = await apiRequest(request, 'POST', RESOURCES, {
         token,
@@ -120,6 +123,13 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       })
       expect(createRes.status(), 'create with a deleted type').toBe(400)
       expect(await readJsonSafe(createRes)).toMatchObject({ error: UNAVAILABLE_ERROR, code: UNAVAILABLE_CODE })
+
+      const unknownRes = await apiRequest(request, 'POST', RESOURCES, {
+        token,
+        data: { name: `QA RESO-012 unknown ${stamp}`, resourceTypeId: randomUUID() },
+      })
+      expect(unknownRes.status(), 'create with an unknown type').toBe(400)
+      expect(await readJsonSafe(unknownRes)).toMatchObject({ code: UNAVAILABLE_CODE })
 
       const plainRes = await apiRequest(request, 'POST', RESOURCES, { token, data: { name: `QA RESO-012 plain ${stamp}` } })
       expect(plainRes.status(), 'create without a type').toBe(201)
@@ -213,15 +223,13 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await login(page, 'admin')
       await page.goto('/backend/resources/resource-types/create', { waitUntil: 'domcontentloaded' })
       const nameInput = page.locator('[data-crud-field-id="name"]').getByRole('textbox')
-      const created: { response: Response | null } = { response: null }
       await expect(async () => {
         await fillControlledInput(nameInput, typeName)
-        created.response = await waitForApiMutation(page, RESOURCE_TYPES, async () => {
-          await page.getByRole('button', { name: 'Save' }).first().click()
-        })
+        await expect(nameInput).toHaveValue(typeName)
       }).toPass({ timeout: 45_000 })
-      const createResponse = created.response
-      if (!createResponse) throw new Error('[internal] resource type create response missing')
+      const createResponse: Response = await waitForApiMutation(page, RESOURCE_TYPES, async () => {
+        await page.getByRole('button', { name: 'Save' }).first().click()
+      })
       expect(createResponse.status(), 'resource type create from the form').toBe(201)
       const typeId = ((await createResponse.json()) as { id: string }).id
       typeIds.push(typeId)
