@@ -2,6 +2,7 @@
 
 import { commandRegistry } from '@open-mercato/shared/lib/commands/registry'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
+import type { CommandRuntimeContext } from '@open-mercato/shared/lib/commands/types'
 import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { ResourcesResource } from '../../data/entities'
 
@@ -32,6 +33,10 @@ jest.mock('@open-mercato/shared/lib/commands/helpers', () => {
 const TEST_TENANT_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
 const TEST_ORG_ID = 'bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb'
 const TEST_TYPE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const ASSIGNED_BODY = {
+  error: 'Resource type has assigned resources.',
+  code: 'resources.resourceTypes.errors.deleteAssigned',
+}
 
 function buildTypeSnapshot() {
   return {
@@ -64,7 +69,7 @@ function buildEnvelope(assignedCount: number) {
     organizationIds: [TEST_ORG_ID],
     request: {} as Request,
     organizationScope: null,
-  }
+  } as unknown as CommandRuntimeContext
   return { em, ctx, record }
 }
 
@@ -86,11 +91,11 @@ describe('resource type "has assigned resources" guard', () => {
     const { em, ctx, record } = buildEnvelope(3)
     const handler = commandRegistry.get('resources.resourceTypes.create')
 
-    const failure = await handler!.undo!({ logEntry: createLogEntry(), ctx } as any).catch((err: unknown) => err)
+    const failure = await handler!.undo!({ input: undefined, logEntry: createLogEntry(), ctx }).catch((err: unknown) => err)
 
     expect(failure).toBeInstanceOf(CrudHttpError)
-    expect((failure as CrudHttpError).status).toBe(400)
-    expect((failure as CrudHttpError).body).toEqual({ error: 'Resource type has assigned resources.' })
+    expect((failure as CrudHttpError).status).toBe(409)
+    expect((failure as CrudHttpError).body).toEqual(ASSIGNED_BODY)
     expect(em.count).toHaveBeenCalledWith(ResourcesResource, {
       resourceTypeId: TEST_TYPE_ID,
       deletedAt: null,
@@ -105,7 +110,7 @@ describe('resource type "has assigned resources" guard', () => {
     const { em, ctx, record } = buildEnvelope(0)
     const handler = commandRegistry.get('resources.resourceTypes.create')
 
-    await handler!.undo!({ logEntry: createLogEntry(), ctx } as any)
+    await handler!.undo!({ input: undefined, logEntry: createLogEntry(), ctx })
 
     expect(record.deletedAt).toBeInstanceOf(Date)
     expect(em.flush).toHaveBeenCalledTimes(1)
@@ -116,7 +121,7 @@ describe('resource type "has assigned resources" guard', () => {
     record.deletedAt = new Date('2026-01-01T00:00:00.000Z')
     const handler = commandRegistry.get('resources.resourceTypes.create')
 
-    await handler!.undo!({ logEntry: createLogEntry(), ctx } as any)
+    await handler!.undo!({ input: undefined, logEntry: createLogEntry(), ctx })
 
     expect(em.count).not.toHaveBeenCalled()
     expect(em.flush).toHaveBeenCalledTimes(1)
@@ -127,11 +132,11 @@ describe('resource type "has assigned resources" guard', () => {
     ;(findOneWithDecryption as jest.Mock).mockResolvedValue(record)
     const handler = commandRegistry.get('resources.resourceTypes.delete')
 
-    const failure = await handler!.execute({ id: TEST_TYPE_ID }, ctx as any).catch((err: unknown) => err)
+    const failure = await handler!.execute({ id: TEST_TYPE_ID }, ctx).catch((err: unknown) => err)
 
     expect(failure).toBeInstanceOf(CrudHttpError)
     expect((failure as CrudHttpError).status).toBe(400)
-    expect((failure as CrudHttpError).body).toEqual({ error: 'Resource type has assigned resources.' })
+    expect((failure as CrudHttpError).body).toEqual(ASSIGNED_BODY)
     expect(record.deletedAt).toBeNull()
     expect(em.flush).not.toHaveBeenCalled()
   })

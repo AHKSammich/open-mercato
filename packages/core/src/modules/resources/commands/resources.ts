@@ -210,14 +210,18 @@ async function syncResourcesResourceTags(em: EntityManager, params: {
 
 type ResourceScope = { tenantId: string; organizationId: string }
 
-async function isLiveResourceType(em: EntityManager, resourceTypeId: string, scope: ResourceScope): Promise<boolean> {
-  const count = await em.count(ResourcesResourceType, {
+async function countResourceTypes(
+  em: EntityManager,
+  resourceTypeId: string,
+  scope: ResourceScope,
+  state: 'live' | 'deleted',
+): Promise<number> {
+  return em.count(ResourcesResourceType, {
     id: resourceTypeId,
     tenantId: scope.tenantId,
     organizationId: scope.organizationId,
-    deletedAt: null,
+    deletedAt: state === 'live' ? null : { $ne: null },
   })
-  return count > 0
 }
 
 async function assertResourceTypeAssignable(
@@ -225,10 +229,11 @@ async function assertResourceTypeAssignable(
   resourceTypeId: string | null | undefined,
   scope: ResourceScope,
 ): Promise<void> {
-  if (!resourceTypeId || await isLiveResourceType(em, resourceTypeId, scope)) return
+  if (!resourceTypeId || await countResourceTypes(em, resourceTypeId, scope, 'live') > 0) return
   const { translate } = await resolveTranslations()
   throw new CrudHttpError(400, {
     error: translate('resources.resources.errors.resourceTypeUnavailable', 'The selected resource type is no longer available.'),
+    code: 'resources.resources.errors.resourceTypeUnavailable',
   })
 }
 
@@ -240,7 +245,7 @@ async function assertResourceTypeRestorable(
 ): Promise<void> {
   if (!resourceTypeId) return
   if (record && !record.deletedAt && record.resourceTypeId === resourceTypeId) return
-  if (await isLiveResourceType(em, resourceTypeId, scope)) return
+  if (await countResourceTypes(em, resourceTypeId, scope, 'deleted') === 0) return
   const { translate } = await resolveTranslations()
   throw new CrudHttpError(409, {
     error: translate(
@@ -624,7 +629,7 @@ const updateResourceCommand: CommandHandler<ResourcesResourceUpdateInput, { reso
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const record = await em.findOne(ResourcesResource, { id: before.id })
     if (!record) return
-    if (!before.deletedAt) await assertResourceTypeRestorable(em, record, before.resourceTypeId, before)
+    await assertResourceTypeRestorable(em, record, before.resourceTypeId, before)
     await withAtomicFlush(em, [
       () => {
         record.name = before.name

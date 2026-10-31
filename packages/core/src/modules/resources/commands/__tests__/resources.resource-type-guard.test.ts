@@ -2,6 +2,7 @@
 
 import { commandRegistry } from '@open-mercato/shared/lib/commands/registry'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
+import type { CommandRuntimeContext, CommandUndoLogEntry } from '@open-mercato/shared/lib/commands/types'
 import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { ResourcesResourceType } from '../../data/entities'
 
@@ -35,7 +36,10 @@ const TEST_RESOURCE_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const TEST_TYPE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const OTHER_TYPE_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 
-const UNAVAILABLE_BODY = { error: 'The selected resource type is no longer available.' }
+const UNAVAILABLE_BODY = {
+  error: 'The selected resource type is no longer available.',
+  code: 'resources.resources.errors.resourceTypeUnavailable',
+}
 const DELETED_BODY = {
   error: 'The resource type of this resource was deleted. Undo the resource type deletion first.',
   code: 'resources.resources.errors.resourceTypeDeleted',
@@ -65,8 +69,12 @@ function buildSnapshot(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function buildEnvelope(options: { record?: Record<string, unknown> | null; liveTypeIds?: string[] } = {}) {
+type EnvelopeOptions = { record?: Record<string, unknown> | null; liveTypeIds?: string[]; deletedTypeIds?: string[] }
+type TypeCountWhere = { id: string; tenantId: string; organizationId: string; deletedAt: null | { $ne: null } }
+
+function buildEnvelope(options: EnvelopeOptions = {}) {
   const liveTypeIds = new Set(options.liveTypeIds ?? [])
+  const deletedTypeIds = new Set(options.deletedTypeIds ?? [])
   const em = {
     begin: jest.fn().mockResolvedValue(undefined),
     commit: jest.fn().mockResolvedValue(undefined),
@@ -76,9 +84,10 @@ function buildEnvelope(options: { record?: Record<string, unknown> | null; liveT
     nativeDelete: jest.fn().mockResolvedValue(undefined),
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn().mockResolvedValue(options.record ?? null),
-    count: jest.fn().mockImplementation(async (_entity: unknown, where: { id: string; tenantId: string; organizationId: string }) =>
-      liveTypeIds.has(where.id) && where.tenantId === TEST_TENANT_ID && where.organizationId === TEST_ORG_ID ? 1 : 0,
-    ),
+    count: jest.fn().mockImplementation(async (_entity: unknown, where: TypeCountWhere) => {
+      if (where.tenantId !== TEST_TENANT_ID || where.organizationId !== TEST_ORG_ID) return 0
+      return (where.deletedAt === null ? liveTypeIds : deletedTypeIds).has(where.id) ? 1 : 0
+    }),
     getReference: jest.fn((_entity: unknown, id: string) => ({ id })),
     create: jest.fn((_entity: unknown, data: Record<string, unknown>) => ({ id: TEST_RESOURCE_ID, ...data })),
   }
@@ -94,12 +103,12 @@ function buildEnvelope(options: { record?: Record<string, unknown> | null; liveT
     organizationIds: [TEST_ORG_ID],
     request: {} as Request,
     organizationScope: null,
-  }
+  } as unknown as CommandRuntimeContext
   return { em, ctx }
 }
 
-function asLogEntry(commandPayload: unknown) {
-  return { commandPayload } as any
+function asLogEntry(commandPayload: unknown): CommandUndoLogEntry {
+  return { commandPayload }
 }
 
 async function captureFailure(promise: Promise<unknown>): Promise<CrudHttpError> {
@@ -118,14 +127,14 @@ describe('resources commands — resource type must be live', () => {
     ;(findOneWithDecryption as jest.Mock).mockReset().mockResolvedValue(null)
   })
 
-  it('create rejects a resource type that is deleted, unknown or outside the organization', async () => {
+  it('create rejects a resource type that is not live in the organization', async () => {
     const { em, ctx } = buildEnvelope()
     const handler = commandRegistry.get('resources.resources.create')
 
     const failure = await captureFailure(
       handler!.execute(
         { tenantId: TEST_TENANT_ID, organizationId: TEST_ORG_ID, name: 'Resource A', resourceTypeId: TEST_TYPE_ID },
-        ctx as any,
+        ctx,
       ),
     )
 
@@ -148,7 +157,7 @@ describe('resources commands — resource type must be live', () => {
     await expect(
       handler!.execute(
         { tenantId: TEST_TENANT_ID, organizationId: TEST_ORG_ID, name: 'Resource A', resourceTypeId: TEST_TYPE_ID },
-        ctx as any,
+        ctx,
       ),
     ).resolves.toEqual({ resourceId: TEST_RESOURCE_ID })
     expect(em.commit).toHaveBeenCalledTimes(1)
@@ -161,7 +170,7 @@ describe('resources commands — resource type must be live', () => {
     const handler = commandRegistry.get('resources.resources.update')
 
     const failure = await captureFailure(
-      handler!.execute({ id: TEST_RESOURCE_ID, resourceTypeId: OTHER_TYPE_ID }, ctx as any),
+      handler!.execute({ id: TEST_RESOURCE_ID, resourceTypeId: OTHER_TYPE_ID }, ctx),
     )
 
     expect(failure.status).toBe(400)
@@ -177,7 +186,7 @@ describe('resources commands — resource type must be live', () => {
     const handler = commandRegistry.get('resources.resources.update')
 
     await expect(
-      handler!.execute({ id: TEST_RESOURCE_ID, name: 'Renamed', resourceTypeId: TEST_TYPE_ID }, ctx as any),
+      handler!.execute({ id: TEST_RESOURCE_ID, name: 'Renamed', resourceTypeId: TEST_TYPE_ID }, ctx),
     ).resolves.toEqual({ resourceId: TEST_RESOURCE_ID })
     expect(em.count).not.toHaveBeenCalled()
     expect(record.name).toBe('Renamed')
@@ -185,11 +194,11 @@ describe('resources commands — resource type must be live', () => {
 
   it('delete undo refuses to restore a resource whose type was deleted meanwhile', async () => {
     const record = buildSnapshot({ deletedAt: new Date() })
-    const { em, ctx } = buildEnvelope({ record })
+    const { em, ctx } = buildEnvelope({ record, deletedTypeIds: [TEST_TYPE_ID] })
     const handler = commandRegistry.get('resources.resources.delete')
 
     const failure = await captureFailure(
-      handler!.undo!({ logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx } as any),
+      handler!.undo!({ input: undefined, logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx }),
     )
 
     expect(failure.status).toBe(409)
@@ -203,20 +212,36 @@ describe('resources commands — resource type must be live', () => {
     const { ctx } = buildEnvelope({ record, liveTypeIds: [TEST_TYPE_ID] })
     const handler = commandRegistry.get('resources.resources.delete')
 
-    await handler!.undo!({ logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx } as any)
+    await handler!.undo!({ input: undefined, logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx })
 
+    expect(record.deletedAt).toBeNull()
+  })
+
+  it('delete undo leaves a legacy reference to an id that is not a deleted type in scope as it was', async () => {
+    const record = buildSnapshot({ deletedAt: new Date() })
+    const { em, ctx } = buildEnvelope({ record })
+    const handler = commandRegistry.get('resources.resources.delete')
+
+    await handler!.undo!({ input: undefined, logEntry: asLogEntry({ undo: { before: buildSnapshot() } }), ctx })
+
+    expect(em.count).toHaveBeenCalledWith(ResourcesResourceType, {
+      id: TEST_TYPE_ID,
+      tenantId: TEST_TENANT_ID,
+      organizationId: TEST_ORG_ID,
+      deletedAt: { $ne: null },
+    })
     expect(record.deletedAt).toBeNull()
   })
 
   it('update undo refuses to move a resource back to a deleted type', async () => {
     const record = buildSnapshot({ resourceTypeId: OTHER_TYPE_ID })
-    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [OTHER_TYPE_ID] })
+    const { em, ctx } = buildEnvelope({ record, liveTypeIds: [OTHER_TYPE_ID], deletedTypeIds: [TEST_TYPE_ID] })
     const handler = commandRegistry.get('resources.resources.update')
     const logEntry = asLogEntry({
       undo: { before: buildSnapshot(), after: buildSnapshot({ resourceTypeId: OTHER_TYPE_ID }) },
     })
 
-    const failure = await captureFailure(handler!.undo!({ logEntry, ctx } as any))
+    const failure = await captureFailure(handler!.undo!({ input: undefined, logEntry, ctx }))
 
     expect(failure.status).toBe(409)
     expect(failure.body).toEqual(DELETED_BODY)
@@ -226,11 +251,11 @@ describe('resources commands — resource type must be live', () => {
 
   it('update undo refuses to bring a deleted resource back onto its deleted type', async () => {
     const record = buildSnapshot({ deletedAt: new Date() })
-    const { em, ctx } = buildEnvelope({ record })
+    const { em, ctx } = buildEnvelope({ record, deletedTypeIds: [TEST_TYPE_ID] })
     const handler = commandRegistry.get('resources.resources.update')
     const logEntry = asLogEntry({ undo: { before: buildSnapshot(), after: buildSnapshot({ name: 'Renamed' }) } })
 
-    const failure = await captureFailure(handler!.undo!({ logEntry, ctx } as any))
+    const failure = await captureFailure(handler!.undo!({ input: undefined, logEntry, ctx }))
 
     expect(failure.status).toBe(409)
     expect(failure.body).toEqual(DELETED_BODY)
@@ -244,7 +269,7 @@ describe('resources commands — resource type must be live', () => {
     const handler = commandRegistry.get('resources.resources.update')
     const logEntry = asLogEntry({ undo: { before: buildSnapshot(), after: buildSnapshot({ name: 'Renamed' }) } })
 
-    await handler!.undo!({ logEntry, ctx } as any)
+    await handler!.undo!({ input: undefined, logEntry, ctx })
 
     expect(em.count).not.toHaveBeenCalled()
     expect(record.name).toBe('Resource A')
@@ -252,11 +277,11 @@ describe('resources commands — resource type must be live', () => {
 
   it('create redo refuses to re-create a resource whose type was deleted meanwhile', async () => {
     const record = buildSnapshot({ deletedAt: new Date() })
-    const { em, ctx } = buildEnvelope({ record })
+    const { em, ctx } = buildEnvelope({ record, deletedTypeIds: [TEST_TYPE_ID] })
     const handler = commandRegistry.get('resources.resources.create')
 
     const failure = await captureFailure(
-      handler!.redo!({ logEntry: asLogEntry({ undo: { after: buildSnapshot() } }), ctx } as any),
+      handler!.redo!({ input: undefined, logEntry: asLogEntry({ undo: { after: buildSnapshot() } }), ctx }),
     )
 
     expect(failure.status).toBe(409)

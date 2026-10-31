@@ -72,7 +72,11 @@ async function loadResourceTypeCustomSnapshot(em: EntityManager, snapshot: Resou
   })
 }
 
-async function assertNoAssignedResources(em: EntityManager, resourceType: ResourcesResourceType): Promise<void> {
+async function assertNoAssignedResources(
+  em: EntityManager,
+  resourceType: ResourcesResourceType,
+  status: 400 | 409,
+): Promise<void> {
   const assignedCount = await em.count(ResourcesResource, {
     resourceTypeId: resourceType.id,
     deletedAt: null,
@@ -81,8 +85,9 @@ async function assertNoAssignedResources(em: EntityManager, resourceType: Resour
   })
   if (assignedCount === 0) return
   const { translate } = await resolveTranslations()
-  throw new CrudHttpError(400, {
+  throw new CrudHttpError(status, {
     error: translate('resources.resourceTypes.errors.deleteAssigned', 'Resource type has assigned resources.'),
+    code: 'resources.resourceTypes.errors.deleteAssigned',
   })
 }
 
@@ -166,7 +171,7 @@ const createResourceTypeCommand: CommandHandler<ResourcesResourceTypeCreateInput
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const resourceType = await em.findOne(ResourcesResourceType, { id: after.id })
     if (resourceType) {
-      if (!resourceType.deletedAt) await assertNoAssignedResources(em, resourceType)
+      if (!resourceType.deletedAt) await assertNoAssignedResources(em, resourceType, 409)
       resourceType.deletedAt = new Date()
       resourceType.updatedAt = new Date()
       await em.flush()
@@ -376,7 +381,7 @@ const deleteResourceTypeCommand: CommandHandler<{ id?: string }, { resourceTypeI
     if (!record) throw new CrudHttpError(404, { error: 'Resources resource type not found.' })
     ensureTenantScope(ctx, record.tenantId)
     ensureOrganizationScope(ctx, record.organizationId)
-    await assertNoAssignedResources(em, record)
+    await assertNoAssignedResources(em, record, 400)
     record.deletedAt = new Date()
     record.updatedAt = new Date()
     await em.flush()

@@ -14,7 +14,7 @@ import {
 /**
  * TC-RESO-012: a live resource never points at a deleted resource type.
  *
- * Undoing a resource type create is refused while resources are assigned to the type (same rule as delete).
+ * Undoing a resource type create is refused with 409 while resources are assigned to the type (same rule as delete).
  * Resource create/update refuse a deleted resource type. Undo/redo that would bring a resource back onto a
  * type deleted meanwhile is refused with 409 until the type deletion itself is undone.
  * Reads use a unique `probe` query param so the CRUD list cache never answers them.
@@ -24,7 +24,9 @@ import {
 const RESOURCES = '/api/resources/resources'
 const RESOURCE_TYPES = '/api/resources/resource-types'
 const ASSIGNED_ERROR = 'Resource type has assigned resources.'
+const ASSIGNED_CODE = 'resources.resourceTypes.errors.deleteAssigned'
 const UNAVAILABLE_ERROR = 'The selected resource type is no longer available.'
+const UNAVAILABLE_CODE = 'resources.resources.errors.resourceTypeUnavailable'
 const DELETED_CODE = 'resources.resources.errors.resourceTypeDeleted'
 
 let probe = 0
@@ -85,12 +87,13 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       resourceIds.push(await createResource(request, token, `QA RESO-012 resource ${stamp}`, type.id))
 
       const undoRes = await undoByToken(request, token, type.operation.undoToken)
-      expect(undoRes.status(), 'type create undo with an assigned resource').toBe(400)
-      expect(await readJsonSafe(undoRes)).toMatchObject({ error: ASSIGNED_ERROR })
+      expect(undoRes.status(), 'type create undo with an assigned resource').toBe(409)
+      expect(await readJsonSafe(undoRes)).toMatchObject({ error: ASSIGNED_ERROR, code: ASSIGNED_CODE })
       expect(await readItem(request, token, RESOURCE_TYPES, type.id), 'resource type stays live').not.toBeNull()
 
       const directDelete = await apiRequest(request, 'DELETE', `${RESOURCE_TYPES}?id=${encodeURIComponent(type.id)}`, { token })
       expect(directDelete.status(), 'direct delete keeps the same rule').toBe(400)
+      expect(await readJsonSafe(directDelete)).toMatchObject({ error: ASSIGNED_ERROR, code: ASSIGNED_CODE })
 
       await deleteById(request, token, RESOURCES, resourceIds.pop() as string)
       await undoOk(request, token, type.operation.undoToken, 'type create undo once no resource is assigned')
@@ -116,7 +119,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
         data: { name: `QA RESO-012 resource ${stamp}`, resourceTypeId: deletedType.id },
       })
       expect(createRes.status(), 'create with a deleted type').toBe(400)
-      expect(await readJsonSafe(createRes)).toMatchObject({ error: UNAVAILABLE_ERROR })
+      expect(await readJsonSafe(createRes)).toMatchObject({ error: UNAVAILABLE_ERROR, code: UNAVAILABLE_CODE })
 
       const plainRes = await apiRequest(request, 'POST', RESOURCES, { token, data: { name: `QA RESO-012 plain ${stamp}` } })
       expect(plainRes.status(), 'create without a type').toBe(201)
@@ -129,7 +132,10 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
         headers: { 'Accept-Language': 'de' },
       })
       expect(updateRes.status(), 'update to a deleted type').toBe(400)
-      expect(await readJsonSafe(updateRes)).toMatchObject({ error: 'Der ausgewählte Ressourcentyp ist nicht mehr verfügbar.' })
+      expect(await readJsonSafe(updateRes)).toMatchObject({
+        error: 'Der ausgewählte Ressourcentyp ist nicht mehr verfügbar.',
+        code: UNAVAILABLE_CODE,
+      })
       const stored = await readItem(request, token, RESOURCES, resourceId)
       expect(stored?.resource_type_id ?? null, 'rejected update stored nothing').toBeNull()
     } finally {
@@ -206,7 +212,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       const typeName = `QA RESO-012 ui type ${Date.now()}`
       await login(page, 'admin')
       await page.goto('/backend/resources/resource-types/create', { waitUntil: 'domcontentloaded' })
-      const nameInput = page.locator('form').getByRole('textbox').first()
+      const nameInput = page.locator('[data-crud-field-id="name"]').getByRole('textbox')
       const created: { response: Response | null } = { response: null }
       await expect(async () => {
         await fillControlledInput(nameInput, typeName)
@@ -229,7 +235,7 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
         (response) => response.url().includes('/api/audit_logs/audit-logs/actions/undo') && response.request().method() === 'POST',
       )
       await undoButton.click()
-      expect((await undoResponsePromise).status(), 'banner undo is refused').toBe(400)
+      expect((await undoResponsePromise).status(), 'banner undo is refused').toBe(409)
       await expect(page.getByText(ASSIGNED_ERROR).first()).toBeVisible()
       expect(await readItem(request, token, RESOURCE_TYPES, typeId), 'resource type stays live').not.toBeNull()
     } finally {
