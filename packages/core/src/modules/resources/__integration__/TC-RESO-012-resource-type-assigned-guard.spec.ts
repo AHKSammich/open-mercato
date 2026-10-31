@@ -223,13 +223,15 @@ test.describe('TC-RESO-012: resource type "has assigned resources" rule on undo 
       await login(page, 'admin')
       await page.goto('/backend/resources/resource-types/create', { waitUntil: 'domcontentloaded' })
       const nameInput = page.locator('[data-crud-field-id="name"]').getByRole('textbox')
+      const created: { response: Response | null } = { response: null }
       await expect(async () => {
         await fillControlledInput(nameInput, typeName)
-        await expect(nameInput).toHaveValue(typeName)
+        created.response = await waitForApiMutation(page, RESOURCE_TYPES, async () => {
+          await page.getByRole('button', { name: 'Save' }).first().click()
+        })
       }).toPass({ timeout: 45_000 })
-      const createResponse: Response = await waitForApiMutation(page, RESOURCE_TYPES, async () => {
-        await page.getByRole('button', { name: 'Save' }).first().click()
-      })
+      const createResponse = created.response
+      if (!createResponse) throw new Error('[internal] resource type create response missing')
       expect(createResponse.status(), 'resource type create from the form').toBe(201)
       const typeId = ((await createResponse.json()) as { id: string }).id
       typeIds.push(typeId)
