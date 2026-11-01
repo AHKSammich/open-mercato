@@ -27,6 +27,7 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
     let codeId: string | null = null;
     const redeemer = new Client({ connectionString: resolveIntegrationDatabaseUrl() });
     let redeemerOpen = false;
+    const pendingRequests: Array<ReturnType<typeof apiRequest>> = [];
 
     try {
       const fixture = await createCodeFixture(request, token, {
@@ -88,6 +89,7 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
         token,
         data: { codeId, codeString: voucherCode, cartId: randomUUID(), customerId: null, type: 'dynamic' },
       });
+      pendingRequests.push(usePromise);
       let usePid = 0;
       await expect
         .poll(
@@ -100,6 +102,7 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
         .toBeGreaterThan(0);
 
       const deletePromise = apiRequest(request, 'DELETE', `${CODES_PATH}?id=${encodeURIComponent(codeId)}`, { token });
+      pendingRequests.push(deletePromise);
       await expect
         .poll(async () => (await waitingOn(usePid)).length, {
           message: 'the delete request must wait on the redemption',
@@ -151,6 +154,7 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
         await redeemer.query('rollback').catch(() => undefined);
         await redeemer.end().catch(() => undefined);
       }
+      await Promise.allSettled(pendingRequests);
       await deleteCodeIfExists(request, token, codeId);
       if (codeId) {
         const cleanupCodeId = codeId;
