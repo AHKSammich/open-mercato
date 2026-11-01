@@ -11,6 +11,8 @@ import { CrudHttpError, notFound } from '@open-mercato/shared/lib/crud/errors'
 import type { CrudEventsConfig, CrudIndexerConfig } from '@open-mercato/shared/lib/crud/types'
 import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
 import { createLogger } from '@open-mercato/shared/lib/logger'
+import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
+import { LockMode } from '@mikro-orm/core'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { E } from '#generated/entities.ids.generated'
 import {
@@ -429,9 +431,10 @@ const updateCodeCommand: CommandHandler<PromotionCodeUpdateInput, { codeId: stri
 const deleteCodeCommand: CommandHandler<PromotionCodeDeleteInput, { codeId: string }> = {
   id: 'promotions.code.delete',
   outputSchema: codeCommandOutputSchema,
+  prepareSnapshotInsideTransaction: true,
   async prepare(rawInput, ctx) {
     const parsed = promotionCodeDeleteSchema.parse(rawInput)
-    const em = (ctx.container.resolve('em') as EntityManager).fork()
+    const em = ctx.transactionalEm ?? (ctx.container.resolve('em') as EntityManager).fork()
     const code = await loadCode(em, parsed.id)
     if (!code) return null
     // §API Contracts `DELETE /api/promotions/codes`: "deactivates generated codes."
@@ -452,7 +455,10 @@ const deleteCodeCommand: CommandHandler<PromotionCodeDeleteInput, { codeId: stri
     const parsed = promotionCodeDeleteSchema.parse(rawInput)
     const em = (ctx.container.resolve('em') as EntityManager).fork()
     const code = await loadCode(em, parsed.id)
-    if (!code) throw notFound('Promotion code not found')
+    if (!code) {
+      const { translate } = await resolveTranslations()
+      throw notFound(translate('promotions.errors.code_not_found', 'Promotion code not found'))
+    }
     assertPromotionScopeOrNotFound(ctx, code)
 
     // §Data Models / §API Contracts: soft-delete the `Code` row AND explicitly
@@ -465,6 +471,20 @@ const deleteCodeCommand: CommandHandler<PromotionCodeDeleteInput, { codeId: stri
     await withAtomicFlush(
       em,
       [
+        async () => {
+          const lockedCode = await findOneWithDecryption(
+            em,
+            Code,
+            { id: code.id, deletedAt: null },
+            { lockMode: LockMode.PESSIMISTIC_WRITE, refresh: true },
+            { tenantId: code.tenantId, organizationId: code.organizationId },
+          )
+          if (!lockedCode) {
+            const { translate } = await resolveTranslations()
+            throw notFound(translate('promotions.errors.code_not_found', 'Promotion code not found'))
+          }
+          await ctx.beforeTransactionalWrite?.(em, rawInput)
+        },
         () => {
           code.deletedAt = new Date()
         },

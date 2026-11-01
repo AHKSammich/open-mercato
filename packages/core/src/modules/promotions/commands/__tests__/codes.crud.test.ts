@@ -9,7 +9,8 @@ import { randomUUID } from 'crypto'
 import type { CommandRuntimeContext } from '@open-mercato/shared/lib/commands'
 import { isCrudHttpError } from '@open-mercato/shared/lib/crud/errors'
 import { extractUndoPayload } from '@open-mercato/shared/lib/commands/undo'
-import { Code, GeneratedCode } from '../../data/entities'
+import { LockMode } from '@mikro-orm/core'
+import { Code, CodeUsage, GeneratedCode } from '../../data/entities'
 import { createCodeCommand, updateCodeCommand, deleteCodeCommand } from '../codes'
 import { resolveCodeByString } from '../../lib/code-service'
 
@@ -374,6 +375,85 @@ describe('promotions.code.delete command', () => {
     // This row was already inactive BEFORE the delete (e.g. spent by `codes/use`) — undo
     // must not resurrect it just because it happens to belong to the same code.
     expect(wasAlreadyInactive.active).toBe(false)
+  })
+
+  it('undo keeps a generated code inactive when it was redeemed while the delete waited for the code row lock', async () => {
+    const { em, tables } = createFakeEm()
+    const code = seedCode(tables, { type: 'dynamic', code: null })
+    const voucher = seedGeneratedCode(tables, { codeId: code.id, active: true })
+    const untouched = seedGeneratedCode(tables, { codeId: code.id, active: true })
+    const dataEngine = fakeDataEngine()
+    const baseCtx = fakeCtx(em, { dataEngine })
+    const input = { id: code.id } as any
+
+    const steps: string[] = []
+    let executing = false
+    let redeemed = false
+    const plainFindOne = em.findOne
+    em.findOne = (async (entity: Function, where: Row, options?: { lockMode?: unknown }) => {
+      if (entity === Code && options?.lockMode === LockMode.PESSIMISTIC_WRITE) steps.push('lock')
+      if (entity === Code && executing) {
+        if (!redeemed) {
+          redeemed = true
+          voucher.active = false
+          tables.set(CodeUsage, [...(tables.get(CodeUsage) ?? []), { id: randomUUID(), codeId: code.id, organizationId: ORG, tenantId: TENANT }])
+        }
+      }
+      return plainFindOne(entity, where)
+    }) as FakeEm['findOne']
+
+    const snapshots: { before?: unknown } = {}
+    let executeCtx: CommandRuntimeContext = baseCtx
+    if (deleteCodeCommand.prepareSnapshotInsideTransaction) {
+      executeCtx = {
+        ...baseCtx,
+        beforeTransactionalWrite: async (transactionalEm) => {
+          steps.push('prepare')
+          Object.assign(snapshots, (await deleteCodeCommand.prepare!(input, { ...executeCtx, transactionalEm })) ?? {})
+        },
+      }
+    } else {
+      steps.push('prepare')
+      Object.assign(snapshots, (await deleteCodeCommand.prepare!(input, baseCtx)) ?? {})
+    }
+    executing = true
+    await deleteCodeCommand.execute(input, executeCtx)
+    executing = false
+
+    expect(voucher.active).toBe(false)
+    expect(untouched.active).toBe(false)
+    expect(snapshots.before).toBeDefined()
+
+    const logEntry = await deleteCodeCommand.buildLog!({ input, result: { codeId: code.id }, ctx: executeCtx, snapshots })
+    await deleteCodeCommand.undo!({ logEntry: { commandPayload: logEntry!.payload } as any, ctx: baseCtx, input: {} as any })
+
+    expect(code.deletedAt).toBeNull()
+    expect(untouched.active).toBe(true)
+    expect(voucher.active).toBe(false)
+    expect(tables.get(CodeUsage)).toHaveLength(1)
+    expect(steps).toEqual(['lock', 'prepare'])
+  })
+
+  it('answers 404 without snapshotting when the code is deleted while the delete waits for the code row lock', async () => {
+    const { em, tables } = createFakeEm()
+    const code = seedCode(tables)
+    const dataEngine = fakeDataEngine()
+    const prepare = jest.fn()
+    const ctx: CommandRuntimeContext = { ...fakeCtx(em, { dataEngine }), beforeTransactionalWrite: prepare }
+    const plainFindOne = em.findOne
+    em.findOne = (async (entity: Function, where: Row, options?: { lockMode?: unknown }) => {
+      if (entity === Code && options?.lockMode === LockMode.PESSIMISTIC_WRITE) code.deletedAt = new Date()
+      return plainFindOne(entity, where)
+    }) as FakeEm['findOne']
+
+    expect.assertions(3)
+    try {
+      await deleteCodeCommand.execute({ id: code.id } as any, ctx)
+    } catch (err) {
+      expect(isCrudHttpError(err) && err.status).toBe(404)
+    }
+    expect(prepare).not.toHaveBeenCalled()
+    expect(dataEngine.markOrmEntityChange).not.toHaveBeenCalled()
   })
 
   it('answers a cross-tenant code as not-found (404)', async () => {
