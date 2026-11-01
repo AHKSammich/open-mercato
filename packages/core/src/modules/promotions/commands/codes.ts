@@ -475,7 +475,7 @@ const deleteCodeCommand: CommandHandler<PromotionCodeDeleteInput, { codeId: stri
           const lockedCode = await findOneWithDecryption(
             em,
             Code,
-            { id: code.id, deletedAt: null },
+            { id: code.id, tenantId: code.tenantId, organizationId: code.organizationId, deletedAt: null },
             { lockMode: LockMode.PESSIMISTIC_WRITE, refresh: true },
             { tenantId: code.tenantId, organizationId: code.organizationId },
           )

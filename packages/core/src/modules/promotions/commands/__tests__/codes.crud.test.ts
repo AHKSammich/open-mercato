@@ -377,14 +377,14 @@ describe('promotions.code.delete command', () => {
     expect(wasAlreadyInactive.active).toBe(false)
   })
 
-  it('undo keeps a generated code inactive when it was redeemed while the delete waited for the code row lock', async () => {
+  it('undo keeps a generated code inactive when its redemption commits before the delete holds the code row lock', async () => {
     const { em, tables } = createFakeEm()
     const code = seedCode(tables, { type: 'dynamic', code: null })
     const voucher = seedGeneratedCode(tables, { codeId: code.id, active: true })
     const untouched = seedGeneratedCode(tables, { codeId: code.id, active: true })
     const dataEngine = fakeDataEngine()
     const baseCtx = fakeCtx(em, { dataEngine })
-    const input = { id: code.id } as any
+    const input = { id: code.id }
 
     const steps: string[] = []
     let executing = false
@@ -425,7 +425,8 @@ describe('promotions.code.delete command', () => {
     expect(snapshots.before).toBeDefined()
 
     const logEntry = await deleteCodeCommand.buildLog!({ input, result: { codeId: code.id }, ctx: executeCtx, snapshots })
-    await deleteCodeCommand.undo!({ logEntry: { commandPayload: logEntry!.payload } as any, ctx: baseCtx, input: {} as any })
+    const undoLogEntry = { commandPayload: logEntry!.payload } as unknown as Parameters<NonNullable<typeof deleteCodeCommand.undo>>[0]['logEntry']
+    await deleteCodeCommand.undo!({ logEntry: undoLogEntry, ctx: baseCtx, input })
 
     expect(code.deletedAt).toBeNull()
     expect(untouched.active).toBe(true)
@@ -448,7 +449,7 @@ describe('promotions.code.delete command', () => {
 
     expect.assertions(3)
     try {
-      await deleteCodeCommand.execute({ id: code.id } as any, ctx)
+      await deleteCodeCommand.execute({ id: code.id }, ctx)
     } catch (err) {
       expect(isCrudHttpError(err) && err.status).toBe(404)
     }

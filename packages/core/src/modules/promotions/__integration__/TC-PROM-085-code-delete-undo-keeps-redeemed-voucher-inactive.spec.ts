@@ -9,10 +9,10 @@ import { createCodeFixture, deleteCodeIfExists, CODES_PATH, CODES_USE_PATH, uniq
 
 /**
  * TC-PROM-085: a generated voucher redeemed while a code delete is in flight must stay
- * inactive after that delete is undone. A raw Postgres transaction stands in for
- * `codes/use` (same statement order: lock the code row, lock and deactivate the generated
- * code, insert the usage row) so the delete request can be observed waiting on its lock
- * before the redemption commits.
+ * inactive after that delete is undone. A raw Postgres session holds the voucher's row
+ * lock so a real `POST /api/promotions/codes/use` can be observed holding the code row
+ * lock while it waits; the `DELETE` request is then observed waiting behind that
+ * redemption before the voucher lock is released and both requests complete.
  */
 test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the delete inactive', () => {
   test('undo restores the code and its unused vouchers but not the voucher redeemed during the delete', async ({ request }) => {
@@ -38,6 +38,20 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
       });
       codeId = fixture.id;
 
+      await expect
+        .poll(
+          async () =>
+            withClient(async (client) => {
+              const result = await client.query<{ count: string }>(
+                'select count(*)::text as count from promotion_generated_codes where code_id = $1',
+                [codeId],
+              );
+              return Number(result.rows[0]?.count ?? '0');
+            }),
+          { message: 'the generation job queued by the create must finish before the race starts', timeout: 30_000 },
+        )
+        .toBe(1);
+
       const scope = await withClient(async (client) => {
         const result = await client.query<{ organization_id: string; tenant_id: string }>(
           'select organization_id, tenant_id from promotion_codes where id = $1',
@@ -58,32 +72,44 @@ test.describe('TC-PROM-085: code delete undo keeps a voucher redeemed during the
       redeemerOpen = true;
       const redeemerPid = (await redeemer.query<{ pid: number }>('select pg_backend_pid() as pid')).rows[0].pid;
       await redeemer.query('begin');
-      await redeemer.query('select id from promotion_codes where id = $1 for update', [codeId]);
       await redeemer.query('select id from promotion_generated_codes where id = $1 for update', [voucherId]);
-      await redeemer.query('update promotion_generated_codes set active = false where id = $1', [voucherId]);
-      await redeemer.query(
-        'insert into promotion_code_usages (code_id, customer_id, organization_id, tenant_id, used_at) values ($1, null, $2, $3, now())',
-        [codeId, scope.organization_id, scope.tenant_id],
-      );
 
-      const deletePromise = apiRequest(request, 'DELETE', `${CODES_PATH}?id=${encodeURIComponent(codeId)}`, { token });
+      const waitingOn = (blockerPid: number) =>
+        withClient(async (client) => {
+          const result = await client.query<{ pid: number }>(
+            `select pid from pg_stat_activity
+              where wait_event_type = 'Lock' and $1 = any(pg_blocking_pids(pid))`,
+            [blockerPid],
+          );
+          return result.rows.map((row) => row.pid);
+        });
 
+      const usePromise = apiRequest(request, 'POST', CODES_USE_PATH, {
+        token,
+        data: { codeId, codeString: voucherCode, cartId: randomUUID(), customerId: null, type: 'dynamic' },
+      });
+      let usePid = 0;
       await expect
         .poll(
-          async () =>
-            withClient(async (client) => {
-              const result = await client.query<{ count: string }>(
-                `select count(*)::text as count from pg_stat_activity
-                  where wait_event_type = 'Lock' and $1 = any(pg_blocking_pids(pid))`,
-                [redeemerPid],
-              );
-              return Number(result.rows[0]?.count ?? '0');
-            }),
-          { message: 'the delete request must wait on the redemption lock', timeout: 20_000 },
+          async () => {
+            usePid = (await waitingOn(redeemerPid))[0] ?? 0;
+            return usePid;
+          },
+          { message: 'codes/use must hold the code row lock while it waits on the voucher row', timeout: 20_000 },
         )
         .toBeGreaterThan(0);
 
-      await redeemer.query('commit');
+      const deletePromise = apiRequest(request, 'DELETE', `${CODES_PATH}?id=${encodeURIComponent(codeId)}`, { token });
+      await expect
+        .poll(async () => (await waitingOn(usePid)).length, {
+          message: 'the delete request must wait on the redemption',
+          timeout: 20_000,
+        })
+        .toBeGreaterThan(0);
+
+      await redeemer.query('rollback');
+      const useResponse = await usePromise;
+      expect(useResponse.status(), 'the redemption should succeed').toBe(200);
       const deleteResponse = await deletePromise;
       expect(deleteResponse.status(), 'DELETE /api/promotions/codes should succeed').toBe(200);
       const deleteOperation = expectOperation(deleteResponse, 'promotions code delete');
