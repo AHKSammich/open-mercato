@@ -85,6 +85,14 @@ const MAX_PURGE_EXCLUSIONS = 1000
 const deriveOrgFromId = new Set<string>(['directory:organization'])
 const COVERAGE_REFRESH_THROTTLE_MS = 5 * 60 * 1000
 const lastCoverageReset = new Map<string, number>()
+/**
+ * The active-job guard treats an unfinished job whose heartbeat is older than this as
+ * abandoned (its worker died before `finalizeJob`), so the scope's next non-forced sweep
+ * after the window runs instead of being skipped forever. A sweep queued inside the window
+ * is still skipped; a forced sweep is never held back. The heartbeat only moves once per
+ * batch, so the window is far wider than the status API's 60-second "stalled" badge.
+ */
+const ACTIVE_JOB_HEARTBEAT_WINDOW_SECONDS = 10 * 60
 
 const REINDEX_DECRYPT_DEBUG_KEYS = ['display_name', 'first_name', 'last_name', 'brand_name', 'legal_name', 'primary_email', 'primary_phone'] as const
 
@@ -355,10 +363,11 @@ export async function reindexEntity(
       .select(['id' as any])
       .where('entity_type' as any, '=', entityType)
       .where('finished_at' as any, 'is', null as any)
-      .where(sql<boolean>`organization_id is not distinct from ${null}`)
+      .where(sql<boolean>`organization_id is not distinct from ${organizationId ?? null}`)
       .where(sql<boolean>`tenant_id is not distinct from ${tenantId ?? null}`)
       .where(sql<boolean>`partition_index is not distinct from ${partitionIndex}`)
       .where(sql<boolean>`partition_count is not distinct from ${usingPartitions ? partitionCountRaw : null}`)
+      .where(sql<boolean>`heartbeat_at > now() - make_interval(secs => ${ACTIVE_JOB_HEARTBEAT_WINDOW_SECONDS})`)
       .executeTakeFirst()
     if (activeJob) {
       return {
@@ -445,7 +454,7 @@ export async function reindexEntity(
     .selectFrom('entity_index_jobs' as any)
     .select(['started_at' as any])
     .where('entity_type' as any, '=', entityType)
-    .where('organization_id' as any, 'is', null as any)
+    .where(sql<boolean>`organization_id is not distinct from ${organizationId ?? null}`)
     .where(sql<boolean>`tenant_id is not distinct from ${tenantId ?? null}`)
     .where(sql<boolean>`partition_index is not distinct from ${partitionIndex}`)
     .where(sql<boolean>`partition_count is not distinct from ${usingPartitions ? partitionCountRaw : null}`)
