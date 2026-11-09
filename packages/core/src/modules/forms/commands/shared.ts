@@ -75,7 +75,7 @@ export async function throwFormsUndoConflict(): Promise<never> {
 
 /**
  * Applies an undo to one row under a row lock. When the log entry carries a
- * stale-check `after` snapshot, the undo is refused with a 409 if any field it
+ * stale-check `after` snapshot, the undo is refused with a 409 when a field it
  * would restore no longer matches that snapshot, so a newer edit is never
  * overwritten. `apply` returns false to skip the row without writing. Returns
  * the updated row, or null when nothing was written.
