@@ -83,17 +83,18 @@ function createHarness(rows: Row[]) {
   }
 }
 
-function logEntryFor(undo: Record<string, unknown>) {
-  return { commandPayload: { undo } }
+function logEntryFor(undo: Record<string, unknown>, scope: Record<string, string> = {}) {
+  return { commandPayload: { undo }, ...scope }
 }
 
 async function runUndo(
   handler: CommandHandler<never, never>,
   ctx: CommandRuntimeContext,
   undo: Record<string, unknown>,
+  scope: Record<string, string> = {},
 ): Promise<unknown> {
   if (!handler.undo) throw new Error('[internal] handler has no undo')
-  return handler.undo({ logEntry: logEntryFor(undo), ctx } as never)
+  return handler.undo({ logEntry: logEntryFor(undo, scope), ctx } as never)
 }
 
 async function expectUndoConflict(promise: Promise<unknown>) {
@@ -271,7 +272,10 @@ describe('forms undo refuses to overwrite a newer change', () => {
         { formId: recordId, updatedAt: after.updatedAt },
         harness.ctx,
       )
-      expect(harness.findOneCalls[0].options).toEqual({ refresh: true })
+      expect(harness.findOneCalls[0]).toEqual({
+        where: { id: recordId, tenantId, organizationId },
+        options: { refresh: true },
+      })
     })
   })
 
@@ -403,6 +407,13 @@ describe('forms undo refuses to overwrite a newer change', () => {
       expect(log?.payload).toEqual({ undo: { before, after, staleCheck: true } })
     })
 
+    it('keeps the previous behaviour for send log entries written before the stale check', async () => {
+      const row = invitationRow(recordId, { status: 'opened', sentAt: new Date(after.sentAt), sendCount: 1 })
+      const harness = createHarness([row])
+      await runUndo(asHandler(sendInvitationCommand), harness.ctx, { before })
+      expect(row).toMatchObject({ status: 'pending', sentAt: null, sendCount: 0 })
+    })
+
     it('restores a revoke when the invitation is still revoked', async () => {
       const row = invitationRow(recordId, { status: 'revoked' })
       const harness = createHarness([row])
@@ -443,15 +454,16 @@ describe('forms undo refuses to overwrite a newer change', () => {
         invitationRow(secondId),
       ]
       const harness = createHarness(rows)
-      await runUndo(asHandler(createInvitationCommand), harness.ctx, {
-        invitationIds: [recordId, secondId],
-        invitations: snapshots,
-        staleCheck: true,
-      })
+      await runUndo(
+        asHandler(createInvitationCommand),
+        harness.ctx,
+        { invitationIds: [recordId, secondId], invitations: snapshots, staleCheck: true },
+        { tenantId, organizationId },
+      )
       expect(harness.removed).toEqual([recordId, secondId])
       expect(harness.em.find).toHaveBeenCalledWith(
         expect.anything(),
-        { id: { $in: [recordId, secondId] } },
+        { id: { $in: [recordId, secondId] }, tenantId, organizationId },
         { lockMode: LockMode.PESSIMISTIC_WRITE, orderBy: { id: 'asc' } },
       )
     })

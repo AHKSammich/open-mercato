@@ -378,7 +378,7 @@ const updateDistributionCommand: CommandHandler<FormDistributionUpdateCommandInp
     const distribution = await findOneWithDecryption(
       em,
       FormDistribution,
-      { id: result.distributionId },
+      { id: result.distributionId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )
@@ -493,7 +493,7 @@ const closeDistributionCommand: CommandHandler<FormDistributionCloseCommandInput
     const distribution = await findOneWithDecryption(
       em,
       FormDistribution,
-      { id: result.distributionId },
+      { id: result.distributionId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )

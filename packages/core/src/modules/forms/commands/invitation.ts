@@ -303,13 +303,18 @@ const createInvitationCommand: CommandHandler<FormInvitationCreateCommandInput, 
     const expectedById = new Map(
       (payload?.staleCheck ? payload.invitations ?? [] : []).map((snapshot) => [snapshot.id, snapshot]),
     )
+    const scope =
+      logEntry.tenantId && logEntry.organizationId
+        ? { tenantId: logEntry.tenantId, organizationId: logEntry.organizationId }
+        : null
     const em = resolveEntityManager(ctx).fork()
     const stale = await em.transactional(async (tx) => {
       const invitations = await findWithDecryption(
         tx,
         FormInvitation,
-        { id: { $in: ids } },
+        scope ? { id: { $in: ids }, ...scope } : { id: { $in: ids } },
         { lockMode: LockMode.PESSIMISTIC_WRITE, orderBy: { id: 'asc' } },
+        scope ?? undefined,
       )
       const changed = invitations.some((invitation) => {
         const expected = expectedById.get(invitation.id)

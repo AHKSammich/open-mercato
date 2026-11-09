@@ -164,10 +164,9 @@ test.describe('TC-FORMS-LOCK-002: forms undo refuses a stale snapshot', () => {
       )
       await nameInput.fill('QA LOCK002 UI Admin')
       expect((await saved).status()).toBe(200)
-      await renameForm(request, otherToken, formId, 'QA LOCK002 UI Other')
-
       const undoButton = page.getByRole('button', { name: 'Undo', exact: true })
       await expect(undoButton).toBeVisible({ timeout: 5_000 })
+      await renameForm(request, otherToken, formId, 'QA LOCK002 UI Other')
       await undoButton.click()
 
       await expect(page.getByText(UNDO_CONFLICT_MESSAGE).first()).toBeVisible({ timeout: 15_000 })

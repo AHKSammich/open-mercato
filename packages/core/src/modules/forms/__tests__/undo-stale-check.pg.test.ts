@@ -47,6 +47,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms))
 }
 
+function ignoreUndoConflict(error: unknown): void {
+  if ((error as { status?: number } | null)?.status !== 409) throw error
+}
+
+async function waitForLockWaiters(count: () => Promise<number>, expected: number, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  let current = await count()
+  while (current !== expected && Date.now() < deadline) {
+    await delay(50)
+    current = await count()
+  }
+  return current
+}
+
 function withGatedFlush(em: EntityManager, beforeFlush: () => Promise<void>): EntityManager {
   return new Proxy(em, {
     get(target, property, receiver) {
@@ -191,11 +205,11 @@ maybe('forms undo vs a concurrent write against PostgreSQL', () => {
     const opening = openInvitation(invitationId).finally(() => {
       openSettled = true
     })
-    await Promise.race([opening, delay(500)])
+    const waitingOnLock = await waitForLockWaiters(() => lockWaitingUpdates('forms_invitation'), 1, 3_000)
     const openFinishedBeforeUndoWrite = openSettled
-    const waitingOnLock = await lockWaitingUpdates('forms_invitation')
     releaseWrite.resolve()
-    await Promise.all([undoing.catch(() => undefined), opening])
+    await expect(undoing).resolves.toBeUndefined()
+    await opening
 
     const final = await readInvitationStatus(invitationId)
     console.info(
@@ -251,10 +265,10 @@ maybe('forms undo vs a concurrent write against PostgreSQL', () => {
     } as never)
     await writeReached.promise
     const reopening = orm.em.fork().nativeUpdate(FormDistribution, { id: distribution.id }, { status: 'active' })
-    await delay(500)
-    const waitingOnLock = await lockWaitingUpdates('forms_distribution')
+    const waitingOnLock = await waitForLockWaiters(() => lockWaitingUpdates('forms_distribution'), 1)
     releaseWrite.resolve()
-    await Promise.all([undoing.catch(() => undefined), reopening])
+    await expect(undoing).resolves.toBeUndefined()
+    await reopening
 
     const final = await orm.em.fork().findOneOrFail(FormDistribution, { id: distribution.id })
     expect(waitingOnLock).toBe(1)
@@ -270,8 +284,8 @@ maybe('forms undo vs a concurrent write against PostgreSQL', () => {
         ids.map(async (invitationId) => {
           const undoFirst = Math.random() < 0.5
           const jitter = Math.floor(Math.random() * 4)
-          const first = undoFirst ? () => undoSend(invitationId).catch(() => undefined) : () => openInvitation(invitationId)
-          const second = undoFirst ? () => openInvitation(invitationId) : () => undoSend(invitationId).catch(() => undefined)
+          const first = undoFirst ? () => undoSend(invitationId).catch(ignoreUndoConflict) : () => openInvitation(invitationId)
+          const second = undoFirst ? () => openInvitation(invitationId) : () => undoSend(invitationId).catch(ignoreUndoConflict)
           await Promise.all([first(), delay(jitter).then(second)])
         }),
       )

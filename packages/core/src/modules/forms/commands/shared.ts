@@ -77,7 +77,8 @@ export async function throwFormsUndoConflict(): Promise<never> {
  * Applies an undo to one row under a row lock. When the log entry carries a
  * stale-check `after` snapshot, the undo is refused with a 409 if any field it
  * would restore no longer matches that snapshot, so a newer edit is never
- * overwritten. Returns the updated row, or null when nothing was written.
+ * overwritten. `apply` returns false to skip the row without writing. Returns
+ * the updated row, or null when nothing was written.
  */
 export async function applyStaleCheckedUndo<
   TEntity extends { id: string; tenantId: string; organizationId: string },

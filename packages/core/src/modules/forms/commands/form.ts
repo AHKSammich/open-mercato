@@ -249,7 +249,7 @@ const renameFormCommand: CommandHandler<FormRenameCommandInput, { formId: string
     const form = await findOneWithDecryption(
       em,
       Form,
-      { id: result.formId },
+      { id: result.formId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )
@@ -357,7 +357,7 @@ const archiveFormCommand: CommandHandler<FormArchiveCommandInput, { formId: stri
     const form = await findOneWithDecryption(
       em,
       Form,
-      { id: result.formId },
+      { id: result.formId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )
@@ -461,7 +461,7 @@ const restoreFormCommand: CommandHandler<FormRestoreCommandInput, { formId: stri
     const form = await findOneWithDecryption(
       em,
       Form,
-      { id: result.formId },
+      { id: result.formId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )

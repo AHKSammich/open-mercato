@@ -406,7 +406,7 @@ const updateDraftCommand: CommandHandler<FormVersionUpdateDraftCommandInput, { v
     const version = await findOneWithDecryption(
       em,
       FormVersion,
-      { id: result.versionId },
+      { id: result.versionId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )
@@ -769,7 +769,7 @@ const archiveVersionCommand: CommandHandler<FormVersionArchiveCommandInput, { ve
     const version = await findOneWithDecryption(
       em,
       FormVersion,
-      { id: result.versionId },
+      { id: result.versionId, tenantId: input.tenantId, organizationId: input.organizationId },
       { refresh: true },
       { tenantId: input.tenantId, organizationId: input.organizationId },
     )
