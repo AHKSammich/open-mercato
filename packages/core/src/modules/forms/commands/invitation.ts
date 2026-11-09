@@ -1,9 +1,10 @@
+import { LockMode } from '@mikro-orm/core'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { registerCommand } from '@open-mercato/shared/lib/commands'
 import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
-import type { CommandHandler } from '@open-mercato/shared/lib/commands'
+import type { CommandHandler, CommandRuntimeContext } from '@open-mercato/shared/lib/commands'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
-import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
+import { findOneWithDecryption, findWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { FormDistribution, FormInvitation } from '../data/entities'
 import {
   invitationCreateCommandSchema,
@@ -20,13 +21,17 @@ import {
 } from '../services/distribution-token'
 import { enqueueInvitationEmail } from '../subscribers/invitation-email'
 import {
+  applyStaleCheckedUndo,
   emitForms,
   ensureOrganizationScope,
   ensureTenantScope,
   extractUndoPayload,
+  hasUndoTargetChanged,
   invalidateFormsCacheTags,
   resolveActorUserId,
   resolveEntityManager,
+  throwFormsUndoConflict,
+  type FormsStaleCheckedUndoPayload,
 } from './shared'
 import { DISTRIBUTION_CACHE_TAGS } from './distribution'
 
@@ -52,12 +57,55 @@ type FormInvitationStatusSnapshot = {
   status: FormInvitation['status']
 }
 
-type FormInvitationSendUndoPayload = {
+type FormInvitationSendUndoPayload = FormsStaleCheckedUndoPayload<FormInvitationSendSnapshot> & {
   before?: FormInvitationSendSnapshot | null
 }
 
-type FormInvitationRevokeUndoPayload = {
+type FormInvitationRevokeUndoPayload = FormsStaleCheckedUndoPayload<FormInvitationStatusSnapshot> & {
   before?: FormInvitationStatusSnapshot | null
+}
+
+type FormInvitationCreateUndoPayload = {
+  invitationIds?: string[]
+  invitations?: FormInvitationSendSnapshot[]
+  staleCheck?: boolean
+}
+
+const INVITATION_SEND_UNDO_FIELDS = ['status', 'sentAt', 'sendCount'] as const
+const INVITATION_REVOKE_UNDO_FIELDS = ['status'] as const
+
+function serializeInvitationSendSnapshot(invitation: FormInvitation): FormInvitationSendSnapshot {
+  return {
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    tenantId: invitation.tenantId,
+    status: invitation.status,
+    sentAt: invitation.sentAt ? invitation.sentAt.toISOString() : null,
+    sendCount: invitation.sendCount,
+  }
+}
+
+function serializeInvitationStatusSnapshot(invitation: FormInvitation): FormInvitationStatusSnapshot {
+  return {
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    tenantId: invitation.tenantId,
+    status: invitation.status,
+  }
+}
+
+async function findInvitationAfterCommand(
+  ctx: CommandRuntimeContext,
+  invitationId: string,
+  scope: { tenantId: string; organizationId: string },
+): Promise<FormInvitation | null> {
+  return findOneWithDecryption(
+    resolveEntityManager(ctx),
+    FormInvitation,
+    { id: invitationId, tenantId: scope.tenantId, organizationId: scope.organizationId },
+    { refresh: true },
+    scope,
+  )
 }
 
 // ----------------------------------------------------------------------------
@@ -218,27 +266,65 @@ const createInvitationCommand: CommandHandler<FormInvitationCreateCommandInput, 
       invitations: created.map((entry) => ({ id: entry.invitation.id, rawToken: entry.rawToken })),
     }
   },
-  buildLog: async ({ input, result }) => {
+  captureAfter: async (input, result, ctx) => {
+    const ids = result.invitations.map((entry) => entry.id)
+    if (ids.length === 0) return []
+    const scope = { tenantId: input.tenantId, organizationId: input.organizationId }
+    const invitations = await findWithDecryption(
+      resolveEntityManager(ctx),
+      FormInvitation,
+      { id: { $in: ids }, ...scope },
+      { refresh: true },
+      scope,
+    )
+    return invitations.map(serializeInvitationSendSnapshot)
+  },
+  buildLog: async ({ input, result, snapshots }) => {
     const { translate } = await resolveTranslations()
+    const after = Array.isArray(snapshots.after) ? (snapshots.after as FormInvitationSendSnapshot[]) : null
     return {
       actionLabel: translate('forms.audit.invitation.create', 'Create invitation'),
       resourceKind: FORM_INVITATION_RESOURCE_KIND,
       resourceId: input.distributionId,
       tenantId: input.tenantId,
       organizationId: input.organizationId,
-      payload: { undo: { invitationIds: result.invitations.map((entry) => entry.id) } },
+      payload: {
+        undo: {
+          invitationIds: result.invitations.map((entry) => entry.id),
+          ...(after ? { invitations: after, staleCheck: true } : {}),
+        } satisfies FormInvitationCreateUndoPayload,
+      },
     }
   },
   undo: async ({ logEntry, ctx }) => {
-    const payload = extractUndoPayload<{ invitationIds?: string[] }>(logEntry)
+    const payload = extractUndoPayload<FormInvitationCreateUndoPayload>(logEntry)
     const ids = payload?.invitationIds
     if (!ids || ids.length === 0) return
+    const expectedById = new Map(
+      (payload?.staleCheck ? payload.invitations ?? [] : []).map((snapshot) => [snapshot.id, snapshot]),
+    )
     const em = resolveEntityManager(ctx).fork()
-    const invitations = await em.find(FormInvitation, { id: { $in: ids } })
-    for (const invitation of invitations) {
-      em.remove(invitation)
-    }
-    await em.flush()
+    const stale = await em.transactional(async (tx) => {
+      const invitations = await findWithDecryption(
+        tx,
+        FormInvitation,
+        { id: { $in: ids } },
+        { lockMode: LockMode.PESSIMISTIC_WRITE, orderBy: { id: 'asc' } },
+      )
+      const changed = invitations.some((invitation) => {
+        const expected = expectedById.get(invitation.id)
+        return expected
+          ? hasUndoTargetChanged(serializeInvitationSendSnapshot(invitation), expected, INVITATION_SEND_UNDO_FIELDS)
+          : false
+      })
+      if (changed) return true
+      for (const invitation of invitations) {
+        tx.remove(invitation)
+      }
+      await tx.flush()
+      return false
+    })
+    if (stale) await throwFormsUndoConflict()
   },
 }
 
@@ -258,16 +344,7 @@ const sendInvitationCommand: CommandHandler<FormInvitationSendCommandInput, { in
       deletedAt: null,
     })
     if (!invitation) return {}
-    return {
-      before: {
-        id: invitation.id,
-        organizationId: invitation.organizationId,
-        tenantId: invitation.tenantId,
-        status: invitation.status,
-        sentAt: invitation.sentAt ? invitation.sentAt.toISOString() : null,
-        sendCount: invitation.sendCount,
-      } satisfies FormInvitationSendSnapshot,
-    }
+    return { before: serializeInvitationSendSnapshot(invitation) }
   },
   async execute(rawInput, ctx) {
     const parsed = invitationSendCommandSchema.parse(rawInput)
@@ -312,30 +389,51 @@ const sendInvitationCommand: CommandHandler<FormInvitationSendCommandInput, { in
 
     return { invitationId: invitation.id }
   },
+  captureAfter: async (input, result, ctx) => {
+    const invitation = await findInvitationAfterCommand(ctx, result.invitationId, {
+      tenantId: input.tenantId,
+      organizationId: input.organizationId,
+    })
+    return invitation ? serializeInvitationSendSnapshot(invitation) : null
+  },
   buildLog: async ({ result, snapshots }) => {
     const { translate } = await resolveTranslations()
     const before = snapshots.before as FormInvitationSendSnapshot | undefined
+    const after = snapshots.after as FormInvitationSendSnapshot | undefined
     return {
       actionLabel: translate('forms.audit.invitation.send', 'Send invitation'),
       resourceKind: FORM_INVITATION_RESOURCE_KIND,
       resourceId: result.invitationId,
       tenantId: before?.tenantId ?? null,
       organizationId: before?.organizationId ?? null,
-      payload: { undo: { before: before ?? null } satisfies FormInvitationSendUndoPayload },
+      payload: {
+        undo: {
+          before: before ?? null,
+          after: after ?? null,
+          staleCheck: true,
+        } satisfies FormInvitationSendUndoPayload,
+      },
     }
   },
   undo: async ({ logEntry, ctx }) => {
     const payload = extractUndoPayload<FormInvitationSendUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const invitation = await em.findOne(FormInvitation, { id: before.id })
-    if (!invitation) return
-    invitation.status = before.status
-    invitation.sentAt = before.sentAt ? new Date(before.sentAt) : null
-    invitation.sendCount = before.sendCount
-    invitation.updatedAt = new Date()
-    await em.flush()
+    await applyStaleCheckedUndo({
+      ctx,
+      entity: FormInvitation,
+      target: before,
+      payload,
+      serialize: serializeInvitationSendSnapshot,
+      fields: INVITATION_SEND_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.sentAt = before.sentAt ? new Date(before.sentAt) : null
+        record.sendCount = before.sendCount
+        record.updatedAt = new Date()
+        return true
+      },
+    })
   },
 }
 
@@ -355,14 +453,7 @@ const revokeInvitationCommand: CommandHandler<FormInvitationRevokeCommandInput, 
       deletedAt: null,
     })
     if (!invitation) return {}
-    return {
-      before: {
-        id: invitation.id,
-        organizationId: invitation.organizationId,
-        tenantId: invitation.tenantId,
-        status: invitation.status,
-      } satisfies FormInvitationStatusSnapshot,
-    }
+    return { before: serializeInvitationStatusSnapshot(invitation) }
   },
   async execute(rawInput, ctx) {
     const parsed = invitationRevokeCommandSchema.parse(rawInput)
@@ -392,28 +483,49 @@ const revokeInvitationCommand: CommandHandler<FormInvitationRevokeCommandInput, 
 
     return { invitationId: invitation.id }
   },
+  captureAfter: async (input, result, ctx) => {
+    const invitation = await findInvitationAfterCommand(ctx, result.invitationId, {
+      tenantId: input.tenantId,
+      organizationId: input.organizationId,
+    })
+    return invitation ? serializeInvitationStatusSnapshot(invitation) : null
+  },
   buildLog: async ({ result, snapshots }) => {
     const { translate } = await resolveTranslations()
     const before = snapshots.before as FormInvitationStatusSnapshot | undefined
+    const after = snapshots.after as FormInvitationStatusSnapshot | undefined
     return {
       actionLabel: translate('forms.audit.invitation.revoke', 'Revoke invitation'),
       resourceKind: FORM_INVITATION_RESOURCE_KIND,
       resourceId: result.invitationId,
       tenantId: before?.tenantId ?? null,
       organizationId: before?.organizationId ?? null,
-      payload: { undo: { before: before ?? null } satisfies FormInvitationRevokeUndoPayload },
+      payload: {
+        undo: {
+          before: before ?? null,
+          after: after ?? null,
+          staleCheck: true,
+        } satisfies FormInvitationRevokeUndoPayload,
+      },
     }
   },
   undo: async ({ logEntry, ctx }) => {
     const payload = extractUndoPayload<FormInvitationRevokeUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const invitation = await em.findOne(FormInvitation, { id: before.id })
-    if (!invitation) return
-    invitation.status = before.status
-    invitation.updatedAt = new Date()
-    await em.flush()
+    await applyStaleCheckedUndo({
+      ctx,
+      entity: FormInvitation,
+      target: before,
+      payload,
+      serialize: serializeInvitationStatusSnapshot,
+      fields: INVITATION_REVOKE_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.updatedAt = new Date()
+        return true
+      },
+    })
   },
 }
 

@@ -1,5 +1,9 @@
+import { isDeepStrictEqual } from 'node:util'
+import { LockMode, type EntityName, type FilterQuery } from '@mikro-orm/core'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
+import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
+import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import {
   ensureOrganizationScope,
   ensureSameScope,
@@ -36,6 +40,78 @@ export const FORM_VERSION_RESOURCE_KIND = 'forms.form_version'
  */
 export function resolveEntityManager(ctx: CommandRuntimeContext): EntityManager {
   return ctx.container.resolve<EntityManager>('em')
+}
+
+export type FormsStaleCheckedUndoPayload<TSnapshot> = {
+  after?: TSnapshot | null
+  staleCheck?: boolean
+}
+
+function normalizeSnapshotValue(value: unknown): unknown {
+  if (value === undefined) return null
+  return JSON.parse(JSON.stringify(value)) as unknown
+}
+
+export function hasUndoTargetChanged<TSnapshot>(
+  current: TSnapshot,
+  expected: TSnapshot,
+  fields: readonly (keyof TSnapshot)[],
+): boolean {
+  return fields.some(
+    (field) => !isDeepStrictEqual(normalizeSnapshotValue(current[field]), normalizeSnapshotValue(expected[field])),
+  )
+}
+
+export async function throwFormsUndoConflict(): Promise<never> {
+  const { translate } = await resolveTranslations()
+  throw new CrudHttpError(409, {
+    error: translate(
+      'forms.errors.undo_conflict',
+      'This record changed after the action you are undoing. Undo was refused to keep the newer changes.',
+    ),
+    code: 'forms.errors.undo_conflict',
+  })
+}
+
+/**
+ * Applies an undo to one row under a row lock. When the log entry carries a
+ * stale-check `after` snapshot, the undo is refused with a 409 if any field it
+ * would restore no longer matches that snapshot, so a newer edit is never
+ * overwritten. Returns the updated row, or null when nothing was written.
+ */
+export async function applyStaleCheckedUndo<
+  TEntity extends { id: string; tenantId: string; organizationId: string },
+  TSnapshot,
+>(params: {
+  ctx: CommandRuntimeContext
+  entity: EntityName<TEntity>
+  target: { id: string; tenantId: string; organizationId: string }
+  payload: FormsStaleCheckedUndoPayload<TSnapshot> | null | undefined
+  serialize: (record: TEntity) => TSnapshot
+  fields: readonly (keyof TSnapshot)[]
+  apply: (record: TEntity) => boolean
+}): Promise<TEntity | null> {
+  const em = resolveEntityManager(params.ctx).fork()
+  const outcome = await em.transactional(async (tx) => {
+    const { id, tenantId, organizationId } = params.target
+    const record = await findOneWithDecryption(
+      tx,
+      params.entity,
+      { id, tenantId, organizationId } as FilterQuery<TEntity>,
+      { lockMode: LockMode.PESSIMISTIC_WRITE },
+      { tenantId, organizationId },
+    )
+    if (!record) return { record: null, stale: false }
+    const expected = params.payload?.staleCheck ? params.payload.after : null
+    if (expected && hasUndoTargetChanged(params.serialize(record), expected, params.fields)) {
+      return { record: null, stale: true }
+    }
+    if (!params.apply(record)) return { record: null, stale: false }
+    await tx.flush()
+    return { record, stale: false }
+  })
+  if (outcome.stale) await throwFormsUndoConflict()
+  return outcome.record
 }
 
 /**

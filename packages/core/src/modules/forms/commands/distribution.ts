@@ -4,6 +4,7 @@ import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
 import type { CommandHandler } from '@open-mercato/shared/lib/commands'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
 import { enforceCommandOptimisticLockWithGuards } from '@open-mercato/shared/lib/crud/optimistic-lock-command'
+import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { FormDistribution } from '../data/entities'
 import {
   distributionCloseCommandSchema,
@@ -16,6 +17,7 @@ import {
 import { generatePublicSlug } from '../services/distribution-token'
 import {
   FORMS_CACHE_TAGS,
+  applyStaleCheckedUndo,
   emitForms,
   ensureOrganizationScope,
   ensureTenantScope,
@@ -24,6 +26,7 @@ import {
   invalidateFormsCacheTags,
   resolveActorUserId,
   resolveEntityManager,
+  type FormsStaleCheckedUndoPayload,
 } from './shared'
 
 export const FORM_DISTRIBUTION_RESOURCE_KIND = 'forms.distribution'
@@ -56,10 +59,22 @@ export type FormDistributionSnapshot = {
   updatedAt: string
 }
 
-type FormDistributionUndoPayload = {
+type FormDistributionUndoPayload = FormsStaleCheckedUndoPayload<FormDistributionSnapshot> & {
   before?: FormDistributionSnapshot | null
-  after?: FormDistributionSnapshot | null
 }
+
+const DISTRIBUTION_UPDATE_UNDO_FIELDS = [
+  'status',
+  'title',
+  'maxResponses',
+  'opensAt',
+  'closesAt',
+  'redirectUrl',
+  'allowMultipleSubmissions',
+  'requireCustomerAuth',
+  'settings',
+] as const
+const DISTRIBUTION_CLOSE_UNDO_FIELDS = ['status'] as const
 
 export function serializeDistributionSnapshot(distribution: FormDistribution): FormDistributionSnapshot {
   return {
@@ -358,9 +373,15 @@ const updateDistributionCommand: CommandHandler<FormDistributionUpdateCommandInp
 
     return { distributionId: distribution.id, updatedAt: distribution.updatedAt.toISOString() }
   },
-  captureAfter: async (_input, result, ctx) => {
+  captureAfter: async (input, result, ctx) => {
     const em = resolveEntityManager(ctx)
-    const distribution = await em.findOne(FormDistribution, { id: result.distributionId })
+    const distribution = await findOneWithDecryption(
+      em,
+      FormDistribution,
+      { id: result.distributionId },
+      { refresh: true },
+      { tenantId: input.tenantId, organizationId: input.organizationId },
+    )
     return distribution ? serializeDistributionSnapshot(distribution) : null
   },
   buildLog: async ({ result, snapshots }) => {
@@ -376,7 +397,11 @@ const updateDistributionCommand: CommandHandler<FormDistributionUpdateCommandInp
       snapshotBefore: before ?? null,
       snapshotAfter: after ?? null,
       payload: {
-        undo: { before: before ?? null, after: after ?? null } satisfies FormDistributionUndoPayload,
+        undo: {
+          before: before ?? null,
+          after: after ?? null,
+          staleCheck: true,
+        } satisfies FormDistributionUndoPayload,
       },
     }
   },
@@ -384,20 +409,28 @@ const updateDistributionCommand: CommandHandler<FormDistributionUpdateCommandInp
     const payload = extractUndoPayload<FormDistributionUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const distribution = await em.findOne(FormDistribution, { id: before.id })
+    const distribution = await applyStaleCheckedUndo({
+      ctx,
+      entity: FormDistribution,
+      target: before,
+      payload,
+      serialize: serializeDistributionSnapshot,
+      fields: DISTRIBUTION_UPDATE_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.title = before.title
+        record.maxResponses = before.maxResponses
+        record.opensAt = before.opensAt ? new Date(before.opensAt) : null
+        record.closesAt = before.closesAt ? new Date(before.closesAt) : null
+        record.redirectUrl = before.redirectUrl
+        record.allowMultipleSubmissions = before.allowMultipleSubmissions
+        record.requireCustomerAuth = before.requireCustomerAuth
+        record.settings = before.settings
+        record.updatedAt = new Date()
+        return true
+      },
+    })
     if (!distribution) return
-    distribution.status = before.status
-    distribution.title = before.title
-    distribution.maxResponses = before.maxResponses
-    distribution.opensAt = before.opensAt ? new Date(before.opensAt) : null
-    distribution.closesAt = before.closesAt ? new Date(before.closesAt) : null
-    distribution.redirectUrl = before.redirectUrl
-    distribution.allowMultipleSubmissions = before.allowMultipleSubmissions
-    distribution.requireCustomerAuth = before.requireCustomerAuth
-    distribution.settings = before.settings
-    distribution.updatedAt = new Date()
-    await em.flush()
     await invalidateFormsCacheTags(ctx, [
       DISTRIBUTION_CACHE_TAGS.distribution(distribution.id),
       DISTRIBUTION_CACHE_TAGS.distributionList(distribution.formId),
@@ -455,9 +488,15 @@ const closeDistributionCommand: CommandHandler<FormDistributionCloseCommandInput
 
     return { distributionId: distribution.id, updatedAt: distribution.updatedAt.toISOString() }
   },
-  captureAfter: async (_input, result, ctx) => {
+  captureAfter: async (input, result, ctx) => {
     const em = resolveEntityManager(ctx)
-    const distribution = await em.findOne(FormDistribution, { id: result.distributionId })
+    const distribution = await findOneWithDecryption(
+      em,
+      FormDistribution,
+      { id: result.distributionId },
+      { refresh: true },
+      { tenantId: input.tenantId, organizationId: input.organizationId },
+    )
     return distribution ? serializeDistributionSnapshot(distribution) : null
   },
   buildLog: async ({ result, snapshots }) => {
@@ -473,7 +512,11 @@ const closeDistributionCommand: CommandHandler<FormDistributionCloseCommandInput
       snapshotBefore: before ?? null,
       snapshotAfter: after ?? null,
       payload: {
-        undo: { before: before ?? null, after: after ?? null } satisfies FormDistributionUndoPayload,
+        undo: {
+          before: before ?? null,
+          after: after ?? null,
+          staleCheck: true,
+        } satisfies FormDistributionUndoPayload,
       },
     }
   },
@@ -481,12 +524,20 @@ const closeDistributionCommand: CommandHandler<FormDistributionCloseCommandInput
     const payload = extractUndoPayload<FormDistributionUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const distribution = await em.findOne(FormDistribution, { id: before.id })
+    const distribution = await applyStaleCheckedUndo({
+      ctx,
+      entity: FormDistribution,
+      target: before,
+      payload,
+      serialize: serializeDistributionSnapshot,
+      fields: DISTRIBUTION_CLOSE_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.updatedAt = new Date()
+        return true
+      },
+    })
     if (!distribution) return
-    distribution.status = before.status
-    distribution.updatedAt = new Date()
-    await em.flush()
     await invalidateFormsCacheTags(ctx, [
       DISTRIBUTION_CACHE_TAGS.distribution(distribution.id),
       DISTRIBUTION_CACHE_TAGS.distributionList(distribution.formId),

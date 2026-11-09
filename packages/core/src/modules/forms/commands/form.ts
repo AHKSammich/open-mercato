@@ -4,6 +4,7 @@ import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
 import type { CommandHandler } from '@open-mercato/shared/lib/commands'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
 import { enforceCommandOptimisticLockWithGuards } from '@open-mercato/shared/lib/crud/optimistic-lock-command'
+import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { Form } from '../data/entities'
 import {
   formArchiveCommandSchema,
@@ -18,6 +19,7 @@ import {
 import {
   FORMS_CACHE_TAGS,
   FORM_RESOURCE_KIND,
+  applyStaleCheckedUndo,
   emitForms,
   ensureOrganizationScope,
   ensureTenantScope,
@@ -29,16 +31,19 @@ import {
   resolveFormLocaleUpdate,
   serializeFormSnapshot,
   type FormSnapshot,
+  type FormsStaleCheckedUndoPayload,
 } from './shared'
 
 // ----------------------------------------------------------------------------
 // Undo payloads
 // ----------------------------------------------------------------------------
 
-type FormUndoPayload = {
+type FormUndoPayload = FormsStaleCheckedUndoPayload<FormSnapshot> & {
   before?: FormSnapshot | null
-  after?: FormSnapshot | null
 }
+
+const FORM_RENAME_UNDO_FIELDS = ['name', 'description', 'defaultLocale', 'supportedLocales', 'retentionDays'] as const
+const FORM_STATUS_UNDO_FIELDS = ['status', 'archivedAt'] as const
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -239,9 +244,15 @@ const renameFormCommand: CommandHandler<FormRenameCommandInput, { formId: string
 
     return { formId: form.id, updatedAt: form.updatedAt.toISOString() }
   },
-  captureAfter: async (_input, result, ctx) => {
+  captureAfter: async (input, result, ctx) => {
     const em = resolveEntityManager(ctx)
-    const form = await em.findOne(Form, { id: result.formId })
+    const form = await findOneWithDecryption(
+      em,
+      Form,
+      { id: result.formId },
+      { refresh: true },
+      { tenantId: input.tenantId, organizationId: input.organizationId },
+    )
     return form ? serializeFormSnapshot(form) : null
   },
   buildLog: async ({ result, snapshots }) => {
@@ -260,6 +271,7 @@ const renameFormCommand: CommandHandler<FormRenameCommandInput, { formId: string
         undo: {
           before: before ?? null,
           after: after ?? null,
+          staleCheck: true,
         } satisfies FormUndoPayload,
       },
     }
@@ -268,16 +280,24 @@ const renameFormCommand: CommandHandler<FormRenameCommandInput, { formId: string
     const payload = extractUndoPayload<FormUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const form = await em.findOne(Form, { id: before.id })
+    const form = await applyStaleCheckedUndo({
+      ctx,
+      entity: Form,
+      target: before,
+      payload,
+      serialize: serializeFormSnapshot,
+      fields: FORM_RENAME_UNDO_FIELDS,
+      apply: (record) => {
+        record.name = before.name
+        record.description = before.description ?? null
+        record.defaultLocale = before.defaultLocale
+        record.supportedLocales = [...before.supportedLocales]
+        record.retentionDays = before.retentionDays ?? null
+        record.updatedAt = new Date()
+        return true
+      },
+    })
     if (!form) return
-    form.name = before.name
-    form.description = before.description ?? null
-    form.defaultLocale = before.defaultLocale
-    form.supportedLocales = [...before.supportedLocales]
-    form.retentionDays = before.retentionDays ?? null
-    form.updatedAt = new Date()
-    await em.flush()
     await invalidateFormsCacheTags(ctx, [
       FORMS_CACHE_TAGS.formList(form.organizationId),
       FORMS_CACHE_TAGS.form(form.id),
@@ -332,9 +352,15 @@ const archiveFormCommand: CommandHandler<FormArchiveCommandInput, { formId: stri
 
     return { formId: form.id, updatedAt: form.updatedAt.toISOString() }
   },
-  captureAfter: async (_input, result, ctx) => {
+  captureAfter: async (input, result, ctx) => {
     const em = resolveEntityManager(ctx)
-    const form = await em.findOne(Form, { id: result.formId })
+    const form = await findOneWithDecryption(
+      em,
+      Form,
+      { id: result.formId },
+      { refresh: true },
+      { tenantId: input.tenantId, organizationId: input.organizationId },
+    )
     return form ? serializeFormSnapshot(form) : null
   },
   buildLog: async ({ result, snapshots }) => {
@@ -353,6 +379,7 @@ const archiveFormCommand: CommandHandler<FormArchiveCommandInput, { formId: stri
         undo: {
           before: before ?? null,
           after: after ?? null,
+          staleCheck: true,
         } satisfies FormUndoPayload,
       },
     }
@@ -361,13 +388,21 @@ const archiveFormCommand: CommandHandler<FormArchiveCommandInput, { formId: stri
     const payload = extractUndoPayload<FormUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const form = await em.findOne(Form, { id: before.id })
+    const form = await applyStaleCheckedUndo({
+      ctx,
+      entity: Form,
+      target: before,
+      payload,
+      serialize: serializeFormSnapshot,
+      fields: FORM_STATUS_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.archivedAt = before.archivedAt ? new Date(before.archivedAt) : null
+        record.updatedAt = new Date()
+        return true
+      },
+    })
     if (!form) return
-    form.status = before.status
-    form.archivedAt = before.archivedAt ? new Date(before.archivedAt) : null
-    form.updatedAt = new Date()
-    await em.flush()
     await invalidateFormsCacheTags(ctx, [
       FORMS_CACHE_TAGS.formList(form.organizationId),
       FORMS_CACHE_TAGS.form(form.id),
@@ -421,9 +456,15 @@ const restoreFormCommand: CommandHandler<FormRestoreCommandInput, { formId: stri
 
     return { formId: form.id, updatedAt: form.updatedAt.toISOString() }
   },
-  captureAfter: async (_input, result, ctx) => {
+  captureAfter: async (input, result, ctx) => {
     const em = resolveEntityManager(ctx)
-    const form = await em.findOne(Form, { id: result.formId })
+    const form = await findOneWithDecryption(
+      em,
+      Form,
+      { id: result.formId },
+      { refresh: true },
+      { tenantId: input.tenantId, organizationId: input.organizationId },
+    )
     return form ? serializeFormSnapshot(form) : null
   },
   buildLog: async ({ result, snapshots }) => {
@@ -442,6 +483,7 @@ const restoreFormCommand: CommandHandler<FormRestoreCommandInput, { formId: stri
         undo: {
           before: before ?? null,
           after: after ?? null,
+          staleCheck: true,
         } satisfies FormUndoPayload,
       },
     }
@@ -450,13 +492,21 @@ const restoreFormCommand: CommandHandler<FormRestoreCommandInput, { formId: stri
     const payload = extractUndoPayload<FormUndoPayload>(logEntry)
     const before = payload?.before
     if (!before) return
-    const em = resolveEntityManager(ctx).fork()
-    const form = await em.findOne(Form, { id: before.id })
+    const form = await applyStaleCheckedUndo({
+      ctx,
+      entity: Form,
+      target: before,
+      payload,
+      serialize: serializeFormSnapshot,
+      fields: FORM_STATUS_UNDO_FIELDS,
+      apply: (record) => {
+        record.status = before.status
+        record.archivedAt = before.archivedAt ? new Date(before.archivedAt) : null
+        record.updatedAt = new Date()
+        return true
+      },
+    })
     if (!form) return
-    form.status = before.status
-    form.archivedAt = before.archivedAt ? new Date(before.archivedAt) : null
-    form.updatedAt = new Date()
-    await em.flush()
     await invalidateFormsCacheTags(ctx, [
       FORMS_CACHE_TAGS.formList(form.organizationId),
       FORMS_CACHE_TAGS.form(form.id),
