@@ -10,6 +10,7 @@ import {
 } from '@open-mercato/core/modules/dictionaries/commands/factory'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
 import { findOneWithDecryption } from '@open-mercato/shared/lib/encryption/find'
+import { resolveTranslations } from '@open-mercato/shared/lib/i18n/server'
 
 async function ensureDictionary(em: EntityManager, id: string): Promise<Dictionary> {
   const dictionary = await em.findOne(Dictionary, {
@@ -17,7 +18,8 @@ async function ensureDictionary(em: EntityManager, id: string): Promise<Dictiona
     deletedAt: null,
   })
   if (!dictionary) {
-    throw new CrudHttpError(404, { error: 'Dictionary not found' })
+    const { translate } = await resolveTranslations()
+    throw new CrudHttpError(404, { error: translate('dictionaries.errors.not_found', 'Dictionary not found') })
   }
   return dictionary
 }
@@ -39,10 +41,12 @@ registerDictionaryEntryCommands({
   resolveEntry: async ({ em, ctx, id }) => {
     const entry = await findOneWithDecryption(em, DictionaryEntry, id, { populate: ['dictionary'] })
     if (!entry) {
-      throw new CrudHttpError(404, { error: 'Dictionary entry not found' })
+      const { translate } = await resolveTranslations()
+      throw new CrudHttpError(404, { error: translate('dictionaries.errors.entry_not_found', 'Dictionary entry not found') })
     }
     if (entry.dictionary.deletedAt) {
-      throw new CrudHttpError(404, { error: 'Dictionary not found' })
+      const { translate } = await resolveTranslations()
+      throw new CrudHttpError(404, { error: translate('dictionaries.errors.not_found', 'Dictionary not found') })
     }
     const scope = { tenantId: entry.tenantId, organizationId: entry.organizationId }
     ensureDictionaryEntryScope(ctx, scope)

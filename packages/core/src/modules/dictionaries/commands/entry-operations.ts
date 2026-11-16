@@ -50,7 +50,8 @@ async function requireDictionary(
     scope,
   )
   if (!dictionary) {
-    throw new CrudHttpError(404, { error: 'Dictionary not found' })
+    const { translate } = await resolveTranslations()
+    throw new CrudHttpError(404, { error: translate('dictionaries.errors.not_found', 'Dictionary not found') })
   }
   return dictionary
 }
@@ -298,7 +299,8 @@ const setDefaultDictionaryEntryCommand: CommandHandler<
       scope,
     )
     if (!targetEntry) {
-      throw new CrudHttpError(404, { error: 'Dictionary entry not found' })
+      const { translate } = await resolveTranslations()
+      throw new CrudHttpError(404, { error: translate('dictionaries.errors.entry_not_found', 'Dictionary entry not found') })
     }
 
     const existingDefaults = await findWithDecryption(
