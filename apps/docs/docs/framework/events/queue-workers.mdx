@@ -397,7 +397,7 @@ await runWorker({
 })
 ```
 
-Jobs must have a `type` field in their payload to route correctly.
+Jobs must have a `type` field in their payload to route correctly. A job whose `type` has no registered handler fails and goes through the queue's normal retry handling; register a no-op handler for any type you intend to ignore.
 
 ## Integration with Events
 

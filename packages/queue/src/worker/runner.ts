@@ -227,11 +227,10 @@ export function createRoutedHandler<T extends { type: string }>(
 ): JobHandler<T> {
   return async (job, ctx) => {
     const type = job.payload.type
-    const handler = handlers[type]
+    const handler = Object.hasOwn(handlers, type) ? handlers[type] : undefined
 
     if (!handler) {
-      logger.warn('No handler registered for job type', { type })
-      return
+      throw new Error(`[internal] No handler registered for job type: ${type}`)
     }
 
     await handler(job, ctx)
