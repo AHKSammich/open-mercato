@@ -125,6 +125,72 @@ describe('normalizeInboundImapMessage', () => {
     ])
   })
 
+  it('joins the parent conversation via In-Reply-To when References is missing', async () => {
+    const result = await normalizeInboundImapMessage({
+      rawMessage: buildMimeMessage({
+        messageId: '<reply@example.com>',
+        inReplyTo: '<parent@example.com>',
+        from: 'alice@example.com',
+        to: 'bob@example.com',
+        subject: 'Re: original',
+        text: 'replying without a References header',
+      }),
+      uid: 200,
+      accountIdentifier: 'bob@example.com',
+    })
+    expect(result.externalMessageId).toBe('reply@example.com')
+    expect(result.replyToExternalId).toBe('parent@example.com')
+    expect(result.externalConversationId).toBe('parent@example.com')
+  })
+
+  it('uses the first In-Reply-To id as the conversation when it lists several and References is missing', async () => {
+    const result = await normalizeInboundImapMessage({
+      rawMessage: buildMimeMessage({
+        messageId: '<reply@example.com>',
+        inReplyTo: '<first@example.com> <second@example.com>',
+        from: 'alice@example.com',
+        to: 'bob@example.com',
+        subject: 'Re: original',
+        text: 'replying to two messages',
+      }),
+      uid: 201,
+      accountIdentifier: 'bob@example.com',
+    })
+    expect(result.externalConversationId).toBe('first@example.com')
+  })
+
+  it('takes the message id out of a phrase-form In-Reply-To when References is missing', async () => {
+    const result = await normalizeInboundImapMessage({
+      rawMessage: buildMimeMessage({
+        messageId: '<reply@example.com>',
+        inReplyTo: 'Your message of "Mon, 18 May 2026" <parent@example.com>',
+        from: 'alice@example.com',
+        to: 'bob@example.com',
+        subject: 'Re: original',
+        text: 'legacy client reply',
+      }),
+      uid: 202,
+      accountIdentifier: 'bob@example.com',
+    })
+    expect(result.externalConversationId).toBe('parent@example.com')
+  })
+
+  it('keeps its own message id as the conversation when In-Reply-To carries no message id', async () => {
+    const result = await normalizeInboundImapMessage({
+      rawMessage: buildMimeMessage({
+        messageId: '<reply@example.com>',
+        inReplyTo: 'Your message of Monday',
+        from: 'alice@example.com',
+        to: 'bob@example.com',
+        subject: 'Re: original',
+        text: 'no parent id',
+      }),
+      uid: 203,
+      accountIdentifier: 'bob@example.com',
+    })
+    expect(result.externalConversationId).toBe('reply@example.com')
+  })
+
   it('prefers html body when both html and text are present', async () => {
     const result = await normalizeInboundImapMessage({
       rawMessage: buildMimeMessage({

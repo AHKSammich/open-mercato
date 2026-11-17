@@ -15,8 +15,15 @@ import {
  *     idempotency still has a deterministic key.
  *   - `replyToExternalId`     := `In-Reply-To` header (single value).
  *   - `externalConversationId` := the root of the References chain when present,
- *     otherwise the message id itself (single-message thread).
+ *     otherwise the first message id in `In-Reply-To` (the parent), otherwise the
+ *     message id itself (single-message thread).
  */
+
+const MESSAGE_ID_PATTERN = /<([^<>\s]+@[^<>\s]+)>/
+
+function firstMessageId(value: string | null | undefined): string | undefined {
+  return value ? MESSAGE_ID_PATTERN.exec(value)?.[1] : undefined
+}
 
 export interface NormalizeInboundOptions {
   rawMessage: Buffer
@@ -37,12 +44,13 @@ export async function normalizeInboundImapMessage(
     simpleParser: (buf: Buffer | string) => Promise<ParsedMail>
   }
   const parsed = await mailparser.simpleParser(options.rawMessage)
+  const parentMessageId = firstMessageId(parsed.inReplyTo)
 
   return normalizeMimeInbound({
     parsed,
     accountIdentifier: options.accountIdentifier,
     fallbackMessageId: `imap:${options.uid ?? 'unknown'}@${options.accountIdentifier}`,
-    resolveConversationId: ({ messageId, references }) => references[0] ?? messageId,
+    resolveConversationId: ({ messageId, references }) => references[0] ?? parentMessageId ?? messageId,
     receivedAt: options.receivedAt,
     fallbackDate: options.fallbackDate,
     channelMetadata: () => ({ uid: options.uid }),
