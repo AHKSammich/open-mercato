@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { selectModuleFactSheets } from '../setup/tools/shared.js'
 
 const sharedRoot = fileURLToPath(new URL('../../agentic/shared/', import.meta.url))
 const guidesRoot = fileURLToPath(new URL('../../agentic/guides/', import.meta.url))
@@ -630,6 +631,27 @@ test('deterministic evaluation rejects a case its own budgets cannot satisfy (#4
     assert.match(result.stderr, new RegExp(`FAIL ${cases[1].id}:.*declared context exceeds maxContextFiles`))
     assert.match(result.stderr, new RegExp(`FAIL ${cases[2].id}:.*declared context exceeds maxTotalContextBytes: ${declaredTotalOfThird}/${declaredInitialOfThird}`))
     assert.doesNotMatch(result.stderr, new RegExp(`FAIL ${cases[2].id}:.*exceeds maxInitialContextBytes`))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('every catalog case budget fits the module fact-sheets a fresh scaffold ships (#5070)', () => {
+  // The emitted-layout fixture ships no `.ai/guides/modules/`, so the evaluator measures fact-sheet
+  // context as zero bytes there. Staging the generated sheets a scaffold actually receives keeps a
+  // grown fact-sheet from passing CI while a real controller fails its case budgets.
+  const generatedModulesRoot = path.join(generatedGuidesRoot, 'modules')
+  const shipped = selectModuleFactSheets(fileURLToPath(new URL('../../template/', import.meta.url)), generatedModulesRoot)
+  assert.ok(shipped.length > 0, 'the scaffold must ship at least one module fact-sheet')
+  const root = stageApp()
+  try {
+    for (const moduleId of shipped) {
+      fs.cpSync(path.join(generatedModulesRoot, moduleId), path.join(root, '.ai', 'guides', 'modules', moduleId), { recursive: true })
+    }
+    const result = runEvaluator(root, ['--all'])
+    const output = `${result.stdout}\n${result.stderr}`
+    assert.deepEqual(output.match(/^FAIL OMH-\d+:.*exceeds max\w+.*$/gm) ?? [], [])
+    assert.equal(result.status, 0, output)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
