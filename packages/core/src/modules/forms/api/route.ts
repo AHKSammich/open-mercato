@@ -112,7 +112,7 @@ export async function GET(req: Request) {
       ]
     }
     const [forms, total] = await em.findAndCount(Form, where, {
-      orderBy: { updatedAt: 'desc' },
+      orderBy: { updatedAt: 'desc', id: 'desc' },
       limit: pageSize,
       offset: (page - 1) * pageSize,
     })
