@@ -74,8 +74,9 @@ test.describe('TC-CART-PRICE-09: one-sided price with a non-positive tax factor'
 
       const current = await cartStorefrontRequest(store.hostname, CART_CURRENT_PATH, { method: 'GET', cartToken: cart.token });
       expect(current.status, current.text).toBe(200);
-      const [line] = (current.body as CartEnvelope).cart.lines;
-      expect(Number(line.unitPriceGross)).toBe(12);
+      const currentLine = (current.body as CartEnvelope).cart.lines.find((line) => line.id === addedLine?.id);
+      expect(currentLine).toBeDefined();
+      expect(Number(currentLine?.unitPriceGross)).toBe(12);
     } finally {
       if (cartId) await deleteCartRowIfExists(cartId);
       await cleanupCartProductFixture(request, token, product);
