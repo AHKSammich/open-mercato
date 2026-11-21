@@ -191,6 +191,29 @@ describe('DefaultCatalogBuyerPricingService.resolveLinePrice', () => {
     expect(result.amountGross).toBe(105)
   })
 
+  it.each(['-100.0000', '-150.0000'])('returns only the known gross side instead of throwing when the fallback tax rate is %s%%', async (rate) => {
+    addTaxRate({ rate })
+    const rows = [baseRow({ id: 'gross-only', unitPriceNet: null, unitPriceGross: '12.00' })]
+
+    const result = await buildService().resolveLinePrice(em, rows, baseContext(), scope)
+
+    expect(result.priceRow?.id).toBe('gross-only')
+    expect(result.amountNet).toBeNull()
+    expect(result.amountGross).toBe(12)
+    expect(result.taxRatePercent).toBeNull()
+  })
+
+  it.each(['-100', '-150'])('returns only the known net side when the row tax rate is %s%%', async (taxRate) => {
+    const rows = [{ ...baseRow({ id: 'net-only', unitPriceNet: '10.00', unitPriceGross: null }), taxRate } as PriceRow]
+
+    const result = await buildService().resolveLinePrice(em, rows, baseContext(), scope)
+
+    expect(result.amountNet).toBe(10)
+    expect(result.amountGross).toBeNull()
+    expect(result.amountGrossExact).toBeNull()
+    expect(result.taxRatePercent).toBeNull()
+  })
+
   it('flags priceIsPromotional when the winning row is a promotional price kind', async () => {
     addTaxRate({ rate: '0.0000' })
     const rows = [

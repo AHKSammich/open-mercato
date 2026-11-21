@@ -1,6 +1,7 @@
 import type { EntityManager, FilterQuery } from '@mikro-orm/postgresql'
 import {
   addDecimals,
+  compareDecimals,
   decimalToNumber,
   decimalToString,
   decimalsEqual,
@@ -103,8 +104,9 @@ function parseExactAmount(value: string | number | null | undefined): string | n
   return parsed ? decimalToString(parsed) : null
 }
 
-function deriveSide(other: string, ratePercent: string, target: 'net' | 'gross', decimalPlaces: number): string {
+function deriveSide(other: string, ratePercent: string, target: 'net' | 'gross', decimalPlaces: number): string | null {
   const factor = addDecimals(1, divideDecimals(ratePercent, 100))
+  if (compareDecimals(factor, 0) <= 0) return null
   const derived = target === 'gross' ? multiplyDecimals(other, factor) : divideDecimals(other, factor)
   return decimalToString(roundDecimal(derived, decimalPlaces))
 }
@@ -221,8 +223,12 @@ async function resolveBothSides(
   const rate = rowRate ?? (fallback === null ? null : parseExactAmount(fallback))
   if (rate === null) return toSides(net0, gross0, null)
   const ratePercent = decimalToNumber(rate)
-  if (net0 !== null) return toSides(net0, deriveSide(net0, rate, 'gross', decimalPlaces), ratePercent)
-  return toSides(deriveSide(gross0 as string, rate, 'net', decimalPlaces), gross0, ratePercent)
+  if (net0 !== null) {
+    const gross = deriveSide(net0, rate, 'gross', decimalPlaces)
+    return gross === null ? toSides(net0, null, null) : toSides(net0, gross, ratePercent)
+  }
+  const net = deriveSide(gross0 as string, rate, 'net', decimalPlaces)
+  return net === null ? toSides(null, gross0, null) : toSides(net, gross0, ratePercent)
 }
 
 function sameExactAmount(left: string | null, right: string | null): boolean {
