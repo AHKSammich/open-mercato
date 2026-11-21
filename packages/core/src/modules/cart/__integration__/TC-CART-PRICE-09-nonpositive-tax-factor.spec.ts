@@ -22,7 +22,7 @@ type CartEnvelope = { cart: { lines: CartLineView[] } };
 async function makeGrossOnlyAtFullRebate(priceId: string): Promise<void> {
   await withClient(async (client) => {
     await client.query(
-      `update catalog_product_variant_prices set unit_price_net = null, tax_rate = -100, updated_at = now() where id = $1`,
+      `update catalog_product_variant_prices set unit_price_net = null, unit_price_gross = 12, tax_rate = -100, updated_at = now() where id = $1`,
       [priceId],
     );
   });
@@ -55,8 +55,6 @@ test.describe('TC-CART-PRICE-09: one-sided price with a non-positive tax factor'
         stamp: uniqueStamp(),
         label: 'taxfactor',
         salesChannelId: store.salesChannelId,
-        unitPriceNet: '10.00',
-        unitPriceGross: '12.00',
       });
       await makeGrossOnlyAtFullRebate(product.priceId);
 
