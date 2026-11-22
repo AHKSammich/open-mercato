@@ -200,6 +200,18 @@ describe('GET /api/inbox_ops/proposals', () => {
     )
   })
 
+  it('orders by createdAt with an id tiebreaker so pages stay stable when timestamps tie', async () => {
+    mockFindAndCountWithDecryption.mockResolvedValueOnce([[], 0])
+
+    await GET(makeRequest({ page: '2', pageSize: '5' }))
+
+    const options = mockFindAndCountWithDecryption.mock.calls[0][3] as { orderBy?: Record<string, string> }
+    expect(Object.entries(options.orderBy ?? {})).toEqual([
+      ['createdAt', 'DESC'],
+      ['id', 'DESC'],
+    ])
+  })
+
   it('includes tenant scope in sub-queries', async () => {
     const proposals = [{ id: 'proposal-1', inboxEmailId: 'email-1', summary: 'Test', status: 'pending', createdAt: new Date() }]
     mockFindAndCountWithDecryption.mockResolvedValueOnce([proposals, 1])

@@ -78,7 +78,7 @@ export async function GET(req: Request) {
       {
         limit: query.pageSize,
         offset,
-        orderBy: { createdAt: 'DESC' },
+        orderBy: { createdAt: 'DESC', id: 'DESC' },
       },
       ctx.scope,
     )
