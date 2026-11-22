@@ -19,12 +19,15 @@ test.describe('TC-WF-089: instance signal route rejects a malformed body with 40
     const token = await getAuthToken(request, 'admin')
     const path = `/api/workflows/instances/${randomUUID()}/signal`
 
-    const malformed = await apiRequest(request, 'POST', path, { token, data: '{not valid json' })
+    const malformed = await apiRequest(request, 'POST', path, {
+      token,
+      data: Buffer.from('{not valid json'),
+    })
     expect(malformed.status()).toBe(400)
     const malformedBody = await readJsonSafe<{ error?: string }>(malformed)
     expect(malformedBody?.error).toBe('Invalid request body')
 
-    const empty = await apiRequest(request, 'POST', path, { token, data: '' })
+    const empty = await apiRequest(request, 'POST', path, { token, data: Buffer.alloc(0) })
     expect(empty.status()).toBe(400)
     const emptyBody = await readJsonSafe<{ error?: string }>(empty)
     expect(emptyBody?.error).toBe('Invalid request body')
