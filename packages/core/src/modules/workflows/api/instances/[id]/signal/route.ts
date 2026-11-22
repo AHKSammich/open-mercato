@@ -14,6 +14,7 @@ import {
 } from '../../../openapi'
 import { createLogger } from '@open-mercato/shared/lib/logger'
 import { isCrudHttpError } from '@open-mercato/shared/lib/crud/errors'
+import { readJsonSafe } from '@open-mercato/shared/lib/http/readJsonSafe'
 
 const logger = createLogger('workflows')
 
@@ -80,9 +81,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 })
     }
 
-    const body = await request.json()
-
-    const input = sendSignalSchema.parse(body)
+    const input = sendSignalSchema.parse(await readJsonSafe(request))
 
     await sendSignal(em, container, {
       instanceId: params.id,
