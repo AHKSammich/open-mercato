@@ -72,7 +72,7 @@ export async function GET(req: Request) {
     SyncMapping,
     where,
     {
-      orderBy: { createdAt: 'DESC' },
+      orderBy: { createdAt: 'DESC', id: 'DESC' },
       limit: parsed.data.pageSize,
       offset: (parsed.data.page - 1) * parsed.data.pageSize,
     },
