@@ -171,3 +171,23 @@ describe('communication_channels channel list route — org scoping', () => {
     return capturedWhere()
   }
 })
+
+describe('communication_channels channel list route — stable paging', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    getAuthFromRequestMock.mockResolvedValue({ sub: userId, tenantId, orgId: selectedOrgId })
+    findAndCountWithDecryptionMock.mockResolvedValue([[], 0])
+  })
+
+  it('breaks createdAt ties by id so offset pages never repeat or skip a channel', async () => {
+    const response = await invoke('http://localhost/api/communication_channels/channels?page=3&pageSize=5')
+    expect(response.status).toBe(200)
+
+    expect(findAndCountWithDecryptionMock).toHaveBeenCalledTimes(1)
+    expect(findAndCountWithDecryptionMock.mock.calls[0][3]).toEqual({
+      limit: 5,
+      offset: 10,
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    })
+  })
+})

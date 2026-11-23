@@ -74,7 +74,7 @@ export async function GET(req: Request): Promise<Response> {
     {
       limit: pageSize,
       offset: (page - 1) * pageSize,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: 'desc', id: 'desc' },
     },
     { tenantId: auth.tenantId as string, organizationId: orgFilter.rbacOrganizationId },
   )
