@@ -216,6 +216,8 @@ describe('GET /api/inbox_ops/proposals', () => {
       }),
       expect.any(Object),
     )
+    const [, , , options] = mockFindAndCountWithDecryption.mock.calls[0]
+    expect(Object.keys(options.orderBy)).toEqual(['createdAt', 'id'])
   })
 
   it('includes tenant scope in sub-queries', async () => {
