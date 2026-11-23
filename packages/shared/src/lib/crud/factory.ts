@@ -1128,7 +1128,7 @@ function buildCrudCacheKey(
     `query:${serializeSearchParams(url.searchParams)}`,
   ]
   if (Array.from(url.searchParams.keys()).some((key) => key.startsWith('filter['))) {
-    segments.push('advancedFilters:intersection-v1')
+    segments.push('advancedFilters:v2-tree')
   }
   // The cached list payload already embeds enricher output (enrichment runs before
   // the cache store), so the cache key MUST partition by the set of enrichers a

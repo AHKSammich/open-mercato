@@ -221,6 +221,23 @@ describe('CRUD Factory — list cache is partitioned per caller identity', () =>
     expect(store.has(legacyKey)).toBe(true)
   })
 
+  it('ignores cache entries stored while v2 tree filters were still dropped', async () => {
+    const requestUrl = `${url}&filter[v]=2&filter[root][combinator]=and&filter[root][children][0][type]=rule&filter[root][children][0][field]=owner_user_id&filter[root][children][0][op]=is&filter[root][children][0][value]=user-b`
+    await route.GET(new Request(requestUrl))
+    const currentKey = Array.from(store.keys())[0] as string
+    const staleKey = currentKey.replace('advancedFilters:v2-tree', 'advancedFilters:intersection-v1')
+    store.clear()
+    jest.clearAllMocks()
+    store.set(staleKey, { payload: { items: [{ id: 'unfiltered-row' }], total: 1 }, generatedAt: Date.now() })
+
+    const response = await route.GET(new Request(requestUrl))
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-om-cache')).toBe('miss')
+    expect((await response.json()).items).not.toContainEqual({ id: 'unfiltered-row' })
+    expect(queryEngine.query).toHaveBeenCalledTimes(1)
+    expect(cache.get).not.toHaveBeenCalledWith(staleKey)
+  })
+
   it('encodes explicit empty and finite scopes as different cache keys', async () => {
     await scopeIdentityRoute.GET(new Request(url))
     const finiteKey = Array.from(store.keys())[0] as string

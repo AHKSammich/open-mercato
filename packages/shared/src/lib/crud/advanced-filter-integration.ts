@@ -10,8 +10,10 @@ import { createLogger } from '../logger'
 const logger = createLogger('shared').child({ component: 'crud' })
 
 /**
- * Parse advanced filter query params and merge with existing Where filters.
- * Call this in buildFilters callback to support advanced filter query params.
+ * Parse advanced filter query params (v2 tree first, then legacy v1) and merge
+ * with existing Where filters. `makeCrudRoute` applies this to every list after
+ * `buildFilters`; a route that reads the advanced filter itself should take it
+ * with `consumeAdvancedFilterState` so it is not applied twice.
  */
 export function mergeAdvancedFilters(
   existingFilters: Record<string, unknown>,
