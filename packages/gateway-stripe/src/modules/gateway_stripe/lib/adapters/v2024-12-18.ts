@@ -15,7 +15,7 @@ import type {
   UnifiedPaymentStatus,
 } from '@open-mercato/shared/modules/payment_gateways/types'
 import { resolveStripeClient } from '../client'
-import { mapRefundReason, mapStripeAdapterStatus, mapStripeStatus } from '../status-map'
+import { mapCancellationReason, mapRefundReason, mapStripeAdapterStatus, mapStripeStatus } from '../status-map'
 import {
   toCents,
   fromCents,
@@ -135,7 +135,7 @@ export const stripeAdapterV20241218: GatewayAdapter = {
 
     const cancelled = await stripe.paymentIntents.cancel(
       input.sessionId,
-      { cancellation_reason: 'requested_by_customer' },
+      { cancellation_reason: mapCancellationReason(input.reason) ?? 'requested_by_customer' },
       stripeIdempotencyOptions(input.idempotencyKey),
     )
 

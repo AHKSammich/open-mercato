@@ -1,3 +1,4 @@
+import type Stripe from 'stripe'
 import type { UnifiedPaymentStatus, WebhookEvent } from '@open-mercato/shared/modules/payment_gateways/types'
 
 const STRIPE_STATUS_MAP: Record<string, UnifiedPaymentStatus> = {
@@ -128,5 +129,16 @@ export function mapRefundReason(reason?: string): 'duplicate' | 'fraudulent' | '
     case 'duplicate': return 'duplicate'
     case 'fraud': return 'fraudulent'
     default: return 'requested_by_customer'
+  }
+}
+
+export function mapCancellationReason(reason?: string): Stripe.PaymentIntentCancelParams.CancellationReason | undefined {
+  switch (reason) {
+    case 'duplicate': return 'duplicate'
+    case 'fraud':
+    case 'fraudulent': return 'fraudulent'
+    case 'abandoned': return 'abandoned'
+    case 'requested_by_customer': return 'requested_by_customer'
+    default: return undefined
   }
 }
