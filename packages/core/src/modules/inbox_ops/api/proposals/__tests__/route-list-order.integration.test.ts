@@ -67,7 +67,6 @@ describeWithPostgres('inbox_ops proposals list paging against PostgreSQL', () =>
         createdAt: timestamp,
       }))
       await em.flush()
-      await em.nativeUpdate(InboxProposal, { tenantId, organizationId }, { createdAt: timestamp })
       await em.getConnection().execute('analyze inbox_proposals')
       const seededIds = rows.map((row) => row.id).sort((left, right) => left.localeCompare(right))
       mockAuth.mockReturnValue({ sub: randomUUID(), tenantId, orgId: organizationId })
