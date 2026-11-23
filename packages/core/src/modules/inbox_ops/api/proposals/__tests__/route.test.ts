@@ -200,6 +200,24 @@ describe('GET /api/inbox_ops/proposals', () => {
     )
   })
 
+  it('breaks createdAt ties by id so offset pages stay stable', async () => {
+    mockFindAndCountWithDecryption.mockResolvedValueOnce([[], 0])
+
+    await GET(makeRequest({ page: '2', pageSize: '5' }))
+
+    expect(mockFindAndCountWithDecryption).toHaveBeenCalledWith(
+      mockEm,
+      InboxProposal,
+      expect.any(Object),
+      expect.objectContaining({
+        limit: 5,
+        offset: 5,
+        orderBy: { createdAt: 'DESC', id: 'DESC' },
+      }),
+      expect.any(Object),
+    )
+  })
+
   it('includes tenant scope in sub-queries', async () => {
     const proposals = [{ id: 'proposal-1', inboxEmailId: 'email-1', summary: 'Test', status: 'pending', createdAt: new Date() }]
     mockFindAndCountWithDecryption.mockResolvedValueOnce([proposals, 1])
