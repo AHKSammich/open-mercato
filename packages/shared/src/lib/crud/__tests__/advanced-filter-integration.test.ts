@@ -167,3 +167,56 @@ describe('mergeAdvancedFilters security intersection', () => {
     })
   })
 })
+
+describe('mergeAdvancedFilters v2 tree params', () => {
+  const v2Query = {
+    'filter[v]': '2',
+    'filter[root][combinator]': 'or',
+    'filter[root][children][0][type]': 'rule',
+    'filter[root][children][0][field]': 'display_name',
+    'filter[root][children][0][op]': 'contains',
+    'filter[root][children][0][value]': 'Daniel',
+    'filter[root][children][1][type]': 'rule',
+    'filter[root][children][1][field]': 'display_name',
+    'filter[root][children][1][op]': 'contains',
+    'filter[root][children][1][value]': 'Naomi',
+  }
+
+  it('AND-combines a v2 tree with the route filters', () => {
+    const routeFilters = Object.freeze({ tenant_id: 'tenant-1', kind: 'person' })
+    expect(mergeAdvancedFilters(routeFilters, v2Query)).toEqual({
+      $and: [routeFilters, {
+        $or: [
+          { display_name: { $ilike: '%Daniel%' } },
+          { display_name: { $ilike: '%Naomi%' } },
+        ],
+      }],
+    })
+  })
+
+  it('returns the compiled tree when route filters are empty', () => {
+    expect(mergeAdvancedFilters({}, {
+      'filter[v]': '2',
+      'filter[root][combinator]': 'and',
+      'filter[root][children][0][type]': 'rule',
+      'filter[root][children][0][field]': 'display_name',
+      'filter[root][children][0][op]': 'contains',
+      'filter[root][children][0][value]': 'Daniel',
+    })).toEqual({ display_name: { $ilike: '%Daniel%' } })
+  })
+
+  it('prefers the v2 tree when legacy v1 params are also present', () => {
+    expect(mergeAdvancedFilters({ kind: 'person' }, {
+      ...v2Query,
+      'filter[conditions][0][field]': 'member_id',
+      'filter[conditions][0][op]': 'is_not_empty',
+    })).toEqual({
+      $and: [{ kind: 'person' }, {
+        $or: [
+          { display_name: { $ilike: '%Daniel%' } },
+          { display_name: { $ilike: '%Naomi%' } },
+        ],
+      }],
+    })
+  })
+})

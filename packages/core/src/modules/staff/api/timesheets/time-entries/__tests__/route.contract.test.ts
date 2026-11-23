@@ -228,6 +228,33 @@ describe('buildScopedTimeEntryListFilters — project access', () => {
       ],
     })
   })
+
+  it('consumes the advanced filter once so the CRUD default merge cannot apply it again', async () => {
+    asMember([MEMBER_PROJECT_ID])
+    const query: Row = {
+      'filter[v]': '2',
+      'filter[root][combinator]': 'and',
+      'filter[root][children][0][type]': 'rule',
+      'filter[root][children][0][field]': 'id',
+      'filter[root][children][0][op]': 'equals',
+      'filter[root][children][0][value]': ENTRY_ID,
+    }
+    const expected = {
+      $and: [
+        {
+          $or: [
+            { time_project_id: { $in: [MEMBER_PROJECT_ID] } },
+            { time_project_id: { $eq: null }, staff_member_id: MEMBER_ID },
+          ],
+        },
+        { id: { $eq: ENTRY_ID } },
+      ],
+    }
+
+    await expect(runFilters(query)).resolves.toEqual(expected)
+    expect(Object.keys(query).filter((key) => key.startsWith('filter['))).toEqual([])
+    await expect(runFilters(query)).resolves.toEqual(expected)
+  })
 })
 
 // T3.10 (c) — the task filter. Before it, the drawer's billable / non-billable /

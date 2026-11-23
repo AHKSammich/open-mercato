@@ -17,6 +17,9 @@ export function mergeAdvancedFilters(
   existingFilters: Record<string, unknown>,
   query: Record<string, unknown>,
 ): Record<string, unknown> {
+  const tree = deserializeTree(query)
+  if (tree) return mergeAdvancedFilterTree(existingFilters, tree)
+
   const advancedState = deserializeAdvancedFilter(query)
   if (!advancedState) return existingFilters
 

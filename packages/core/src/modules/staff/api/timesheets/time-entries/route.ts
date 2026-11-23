@@ -35,7 +35,8 @@ import { getTelemetryRuntime } from '@open-mercato/shared/lib/telemetry/runtime'
 import { escapeLikePattern } from '@open-mercato/shared/lib/db/escapeLikePattern'
 import { parseBooleanToken } from '@open-mercato/shared/lib/boolean'
 import { isIdsParamProvided, mergeIdFilter, parseIdsParam } from '@open-mercato/shared/lib/crud/ids'
-import { mergeAdvancedFiltersFromQuery } from '@open-mercato/shared/lib/crud/advanced-filter-integration'
+import { consumeAdvancedFilterState, mergeAdvancedFilterTree } from '@open-mercato/shared/lib/crud/advanced-filter-integration'
+import type { AdvancedFilterTree } from '@open-mercato/shared/lib/query/advanced-filter-tree'
 import { sanitizeSearchTerm } from '../../helpers'
 import type { ModuleConfigService } from '@open-mercato/core/modules/configs/lib/module-config-service'
 import { StaffTimeEntry, StaffTimeEntryTag, StaffTimeProject } from '../../../data/entities'
@@ -193,6 +194,16 @@ type ContainerLike = { resolve: (name: string) => unknown }
 /** One access decision per request, shared by every filter that needs it. */
 const accessByRequest = new WeakMap<Request, Promise<ProjectAccess>>()
 
+/** One advanced-filter tree per list query, so the totals hook still sees what the list consumed. */
+const advancedFilterByQuery = new WeakMap<object, AdvancedFilterTree | null>()
+
+function takeAdvancedFilterTree(query: EntryListQuery): AdvancedFilterTree | null {
+  if (!advancedFilterByQuery.has(query)) {
+    advancedFilterByQuery.set(query, consumeAdvancedFilterState(query as Record<string, unknown>))
+  }
+  return advancedFilterByQuery.get(query) ?? null
+}
+
 async function resolveAssignmentGraceDays(container: ContainerLike, tenantId: string): Promise<number | null> {
   try {
     const configService = container.resolve('moduleConfigService') as ModuleConfigService
@@ -264,6 +275,7 @@ export async function buildScopedTimeEntryListFilters(
   query: EntryListQuery,
   ctx: CrudCtx,
 ): Promise<Record<string, unknown>> {
+  const advancedFilterTree = takeAdvancedFilterTree(query)
   const filters = buildTimeEntryListFilters(query)
 
   // The task narrowing is applied before the access branches and never instead of
@@ -320,7 +332,7 @@ export async function buildScopedTimeEntryListFilters(
   }
 
   const access = await resolveListProjectAccess(ctx)
-  if (access.canManageAll) return mergeAdvancedFiltersFromQuery(filters, query as Record<string, unknown>)
+  if (access.canManageAll) return mergeAdvancedFilterTree(filters, advancedFilterTree)
 
   const branches: Record<string, unknown>[] = []
   if (access.projectIds.length > 0) {
@@ -333,10 +345,10 @@ export async function buildScopedTimeEntryListFilters(
     // A caller with no membership and no staff record gets no row at all — not a
     // redacted one — so an entry's note and its project never leave the server.
     filters[F.id] = { $in: [IMPOSSIBLE_ID] }
-    return mergeAdvancedFiltersFromQuery(filters, query as Record<string, unknown>)
+    return mergeAdvancedFilterTree(filters, advancedFilterTree)
   }
   filters.$or = branches
-  return mergeAdvancedFiltersFromQuery(filters, query as Record<string, unknown>)
+  return mergeAdvancedFilterTree(filters, advancedFilterTree)
 }
 
 /**
