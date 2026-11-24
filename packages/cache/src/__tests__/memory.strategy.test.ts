@@ -373,6 +373,21 @@ describe('Memory Cache Strategy', () => {
       expect(await bounded.get('d')).toBe(4)
     })
 
+    it('keeps rewritten entries alive (writes refresh LRU position)', async () => {
+      const bounded = createMemoryStrategy({ maxEntries: 2 })
+      await bounded.set('a', 1, { tags: ['hot'] })
+      await bounded.set('b', 2, { tags: ['idle'] })
+      await bounded.set('a', 3, { tags: ['hot'] })
+      await bounded.set('c', 4)
+
+      expect(await bounded.get('a')).toBe(3)
+      expect(await bounded.get('b')).toBeNull()
+      expect(await bounded.get('c')).toBe(4)
+      expect(await bounded.deleteByTags(['idle'])).toBe(0)
+      expect(await bounded.deleteByTags(['hot'])).toBe(1)
+      expect((await bounded.stats()).size).toBe(1)
+    })
+
     it('drops evicted keys from the tag index so deleteByTags stays consistent', async () => {
       const bounded = createMemoryStrategy({ maxEntries: 2 })
       await bounded.set('a', 1, { tags: ['shared'] })

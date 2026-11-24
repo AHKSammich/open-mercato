@@ -36,7 +36,7 @@ function normalizeMaxEntries(raw?: number): number {
  * env-tunable via `CACHE_MEMORY_MAX_ENTRIES` resolved in the cache service) so a
  * process-shared instance (OM_BOOTSTRAP_CACHE, long-lived workers, memory-backed
  * CRUD list cache) cannot grow without limit on user-controllable key
- * cardinality. Recency is refreshed on read (Map re-insertion), the oldest
+ * cardinality. Recency is refreshed on read and write (Map re-insertion), the oldest
  * entries are evicted on write, and expired entries are reclaimed by an
  * amortized sweep every N writes — no per-instance timer, so the per-request
  * default stays leak-free (a per-instance setInterval would pin every request's
@@ -160,6 +160,7 @@ export function createMemoryStrategy(options?: { defaultTtl?: number; maxEntries
     const oldEntry = store.get(key)
     if (oldEntry) {
       removeFromTagIndex(key, oldEntry.tags)
+      store.delete(key)
     }
 
     const ttl = options?.ttl ?? defaultTtl
